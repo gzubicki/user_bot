@@ -61,9 +61,11 @@ README.md
    ```bash
    uvicorn bot_platform.telegram.webhooks:app --reload
    ```
-6. **Skonfiguruj webhooki Telegrama**
+6. **Skonfiguruj boty i webhooki Telegrama**
+   - Upewnij się, że w tabeli `bots` znajdują się wpisy z uzupełnionym polem `api_token` oraz ustawioną flagą `is_active=true`.
+     Rekord możesz dodać np. za pomocą konsoli psql lub narzędzia `alembic revision --autogenerate` przygotowującego seed.
    - Wystaw publiczny adres HTTPS (np. za pomocą [ngrok](https://ngrok.com/)).
-   - Dla każdego tokena z listy `BOT_TOKENS` ustaw webhook na adres:
+   - Dla każdego tokena z bazy ustaw webhook na adres:
      ```
      https://twoj-host/telegram/<TOKEN_BOTA>?secret=<WEBHOOK_SECRET>
      ```
@@ -94,11 +96,12 @@ Po skopiowaniu `.env.example` uzupełnij przede wszystkim poniższe wpisy:
 
 | Zmienna | Jak zdobyć / rekomendowana wartość |
 | --- | --- |
-| `BOT_TOKENS` | Lista tokenów botów wydanych przez [@BotFather](https://t.me/BotFather). Dla każdego potrzebnego bota wykonaj `/newbot`, a otrzymane tokeny wpisz po przecinku, np. `123456:AAA,654321:BBB`. |
 | `WEBHOOK_SECRET` | Dowolny losowy, trudny do odgadnięcia ciąg znaków. Można go wygenerować poleceniem `openssl rand -hex 32`. Wartość ta trafia do parametru `secret` podczas konfiguracji webhooków i zabezpiecza endpointy przed nieautoryzowanym użyciem. |
 | `DATABASE_URL` | Adres połączenia z bazą PostgreSQL w formacie `postgresql+asyncpg://user:password@host:port/database`. W środowisku Docker Compose domyślny wpis z `.env.example` będzie poprawny. |
 
 Pozostałe wartości (limity, ceny, ustawienia logowania) można zostawić domyślne lub dostosować do potrzeb. Aplikacja wspiera „hot reload” konfiguracji – zmiana `.env` i ponowne przeładowanie zmiennych środowiskowych (np. restart procesu lub odczyt w harmonogramie) aktualizuje limity w locie.
+
+Tokeny botów są przechowywane bezpośrednio w bazie (kolumna `bots.api_token`). Dzięki temu można je podmieniać bez restartu aplikacji – wystarczy zaktualizować rekord i wywołać endpoint `/internal/reload-config`.
 
 ## Migracje bazy danych
 
