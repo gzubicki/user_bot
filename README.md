@@ -65,7 +65,9 @@ README.md
    ```bash
    uvicorn bot_platform.telegram.webhooks:app --reload
    ```
-6. **Skonfiguruj boty i listę czatów administracyjnych i boty i webhooki Telegrama**
+6. **Skonfiguruj boty i boty i listę czatów administracyjnych i boty i webhooki Telegrama**
+   - Upewnij się, że w tabeli `bots` znajdują się wpisy z uzupełnionym polem `api_token` oraz ustawioną flagą `is_active=true`.
+     Rekord możesz dodać np. za pomocą konsoli psql lub narzędzia `alembic revision --autogenerate` przygotowującego seed.
    - Upewnij się, że w tabeli `bots` znajdują się wpisy z uzupełnionym polem `api_token` oraz ustawioną flagą `is_active=true`.
      Rekord możesz dodać np. za pomocą konsoli psql lub narzędzia `alembic revision --autogenerate` przygotowującego seed.
    - Upewnij się, że w tabeli `bots` znajdują się wpisy z uzupełnionym polem `api_token` oraz ustawioną flagą `is_active=true`.
