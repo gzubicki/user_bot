@@ -3,9 +3,7 @@ from __future__ import annotations
 
 from functools import lru_cache
 from pathlib import Path
-from typing import Iterable, List
-
-from pydantic import BaseModel, Field, field_validator
+from pydantic import BaseModel, Field
 from pydantic_settings import BaseSettings, SettingsConfigDict
 
 
@@ -44,7 +42,6 @@ class LoggingSettings(BaseModel):
 class Settings(BaseSettings):
     model_config = SettingsConfigDict(env_file=".env", env_file_encoding="utf-8", extra="ignore")
 
-    bot_tokens: List[str] = Field(..., alias="BOT_TOKENS")
     webhook_secret: str = Field(..., alias="WEBHOOK_SECRET")
     database_url: str = Field(..., alias="DATABASE_URL")
 
@@ -52,14 +49,6 @@ class Settings(BaseSettings):
     rate_limits: RateLimitSettings
     scheduler: SchedulerSettings
     logging: LoggingSettings
-
-    @field_validator("bot_tokens", mode="before")
-    @classmethod
-    def split_tokens(cls, value: Iterable[str] | str) -> List[str]:
-        if isinstance(value, str):
-            return [token.strip() for token in value.split(",") if token.strip()]
-        return list(value)
-
 
 def _settings_source(env_file: str | Path | None = None) -> Settings:
     return Settings(_env_file=env_file)

@@ -9,6 +9,12 @@ from fastapi.responses import JSONResponse
 
 from ..config import get_settings, reload_settings
 from ..rate_limiting import RateLimiter
+from ..services.bots import (
+    ActiveBotToken,
+    get_active_bot_tokens,
+    get_bot_by_token,
+    refresh_bot_token_cache,
+)
 from .dispatcher import DispatcherBundle, build_dispatcher
 
 app = FastAPI(title="Telegram multi-bot platform")
@@ -17,12 +23,14 @@ _dispatchers: Dict[str, DispatcherBundle] = {}
 _dispatcher_lock = asyncio.Lock()
 
 
-async def _get_dispatcher(token: str) -> DispatcherBundle:
+async def _get_dispatcher(bot: ActiveBotToken) -> DispatcherBundle:
     async with _dispatcher_lock:
-        bundle = _dispatchers.get(token)
+        bundle = _dispatchers.get(bot.token)
         if bundle is None:
-            bundle = build_dispatcher(token)
-            _dispatchers[token] = bundle
+            bundle = build_dispatcher(
+                bot.token, bot_id=bot.bot_id, display_name=bot.display_name
+            )
+            _dispatchers[bot.token] = bundle
         return bundle
 
 
@@ -38,12 +46,12 @@ async def telegram_webhook(
     bot_token: str,
     _: None = Depends(verify_secret),
 ) -> JSONResponse:
-    settings = get_settings()
-    if bot_token not in settings.bot_tokens:
+    bot = await get_bot_by_token(bot_token)
+    if bot is None:
         raise HTTPException(status_code=status.HTTP_404_NOT_FOUND, detail="Unknown bot token")
 
     payload = await request.json()
-    bundle = await _get_dispatcher(bot_token)
+    bundle = await _get_dispatcher(bot)
 
     chat_id = str(payload.get("message", {}).get("chat", {}).get("id", "global"))
     allowed = await _rate_limiter.check(chat_id, "webhook", limit=5, interval_seconds=1)
@@ -57,10 +65,11 @@ async def telegram_webhook(
 @app.post("/internal/reload-config")
 async def reload_config(_: None = Depends(verify_secret)) -> JSONResponse:
     reload_settings()
+    await refresh_bot_token_cache()
     return JSONResponse(content={"status": "reloaded"})
 
 
 @app.get("/healthz")
 async def healthcheck() -> JSONResponse:
-    settings = get_settings()
-    return JSONResponse(content={"status": "ok", "bots": len(settings.bot_tokens)})
+    tokens = await get_active_bot_tokens()
+    return JSONResponse(content={"status": "ok", "bots": len(tokens)})
