@@ -58,6 +58,16 @@ uvicorn bot_platform.telegram.webhooks:app --reload
 
 (For production you would configure Telegram webhooks to hit the `/telegram/{bot_token}` endpoint.)
 
+## Migracje bazy danych
+
+Projekt zawiera wstępnie skonfigurowane środowisko Alembic (`alembic.ini` oraz katalog `alembic/`). Aby zsynchronizować schemat bazy z modelami, ustaw zmienną środowiskową `DATABASE_URL` (np. `export DATABASE_URL=postgresql+asyncpg://user:pass@localhost:5432/dbname`) i uruchom:
+
+```bash
+alembic upgrade head
+```
+
+Jeśli rozpoczynasz zupełnie nowy projekt i katalog `alembic/` nie istnieje, można go odtworzyć poleceniem `alembic init alembic`. W tym repozytorium nie jest to konieczne – struktura migracji jest gotowa do użycia.
+
 ## Testing
 
 Tests are not included yet. Suggested command:
