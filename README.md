@@ -1,16 +1,16 @@
 # Telegram Multi-Bot Quote Platform
 
-This repository contains the foundations of a multi-bot Telegram platform. Each bot mimics a chosen persona and replies with relevant quotes supplied by the community. All moderation and administration flows happen inside private Telegram chats.
+Platforma stanowi fundament do uruchomienia wielu botów Telegrama, które odgrywają różne persony i odpowiadają cytatami dostarczonymi przez społeczność. Moderacja oraz administracja odbywają się w prywatnych czatach Telegrama.
 
-## Key features
+## Najważniejsze funkcje
 
-- **Multi-bot management** – single backend handles multiple Telegram bots, each with its own persona.
-- **Community sourced content** – users forward messages (text, images, audio); administrators moderate each submission.
-- **Subscription model** – activation fee (50 Telegram Stars) and recurring per-chat subscription (10 Stars/month), with support for free grants by admins.
-- **Configuration hot-reload** – operational limits and pricing stored in environment variables and reloaded without restarting the service.
-- **Audit-friendly storage** – Postgres schema keeps track of personas, aliases, submissions, moderation outcomes, subscriptions and audit logs.
+- **Obsługa wielu botów** – pojedynczy backend obsługuje wiele tokenów botów, a każdy bot posiada własną personę.
+- **Treści od społeczności** – użytkownicy przesyłają wiadomości (tekst, obraz, audio), a administratorzy zatwierdzają zgłoszenia.
+- **Model subskrypcji** – jednorazowa opłata aktywacyjna (50 Telegram Stars) oraz miesięczna opłata per czat (10 Stars), z możliwością przydzielania darmowych slotów przez administratorów.
+- **Hot-reload konfiguracji** – limity i ceny przechowywane są w zmiennych środowiskowych i mogą być przeładowywane bez restartu serwera.
+- **Przyjazne audytom dane** – schemat PostgreSQL przechowuje persony, aliasy, zgłoszenia, wyniki moderacji, subskrypcje oraz log audytowy.
 
-## Repository layout
+## Struktura repozytorium
 
 ```
 bot_platform/
@@ -34,67 +34,85 @@ README.md
 .env.example
 ```
 
-## Local development
+## Szybki start (lokalne środowisko)
 
-Create a virtual environment (Python 3.11+):
+1. **Sklonuj repozytorium i wejdź do katalogu projektu**
+   ```bash
+   git clone <adres_repo>
+   cd user_bot
+   ```
+2. **Utwórz wirtualne środowisko (Python 3.11+) i zainstaluj zależności**
+   ```bash
+   python -m venv .venv
+   source .venv/bin/activate
+   pip install -e .[dev]
+   ```
+3. **Skopiuj plik konfiguracyjny i przygotuj zmienne środowiskowe**
+   ```bash
+   cp .env.example .env
+   ```
+   Następnie zaktualizuj `.env` zgodnie z sekcją [Zmienne środowiskowe](#zmienne-środowiskowe--źródła-i-wskazówki).
+4. **Uruchom migracje bazy danych (opcjonalnie przy pierwszym starcie)**
+   Ustaw `DATABASE_URL` w `.env` (np. dla lokalnej bazy `postgresql+asyncpg://postgres:postgres@localhost:5432/user_bot`) i wykonaj:
+   ```bash
+   alembic upgrade head
+   ```
+5. **Uruchom aplikację FastAPI z webhookami**
+   ```bash
+   uvicorn bot_platform.telegram.webhooks:app --reload
+   ```
+6. **Skonfiguruj webhooki Telegrama**
+   - Wystaw publiczny adres HTTPS (np. za pomocą [ngrok](https://ngrok.com/)).
+   - Dla każdego tokena z listy `BOT_TOKENS` ustaw webhook na adres:
+     ```
+     https://twoj-host/telegram/<TOKEN_BOTA>?secret=<WEBHOOK_SECRET>
+     ```
+   - Sekret (`WEBHOOK_SECRET`) musi zgadzać się z wartością w `.env`.
 
-```bash
-python -m venv .venv
-source .venv/bin/activate
-pip install -e .[dev]
-```
+## Uruchomienie przez Docker Compose
 
-Copy the configuration template and adjust values:
+1. Skopiuj plik konfiguracyjny i wypełnij zmienne jak w [Szybkim starcie](#szybki-start-lokalne-środowisko):
+   ```bash
+   cp .env.example .env
+   ```
+2. Zbuduj obraz i wystartuj usługi (aplikacja + PostgreSQL):
+   ```bash
+   docker compose up --build
+   ```
+3. Po uruchomieniu usług (kontener `postgres` uzyska status „healthy”) możesz wejść do kontenera aplikacji i uruchomić migracje:
+   ```bash
+   docker compose run --rm app alembic upgrade head
+   ```
+4. Zatrzymanie całego stosu:
+   ```bash
+   docker compose down
+   ```
 
-```bash
-cp .env.example .env
-```
+## Zmienne środowiskowe – źródła i wskazówki
 
-Run the FastAPI application together with webhook endpoints:
+Po skopiowaniu `.env.example` uzupełnij przede wszystkim poniższe wpisy:
 
-```bash
-uvicorn bot_platform.telegram.webhooks:app --reload
-```
+| Zmienna | Jak zdobyć / rekomendowana wartość |
+| --- | --- |
+| `BOT_TOKENS` | Lista tokenów botów wydanych przez [@BotFather](https://t.me/BotFather). Dla każdego potrzebnego bota wykonaj `/newbot`, a otrzymane tokeny wpisz po przecinku, np. `123456:AAA,654321:BBB`. |
+| `WEBHOOK_SECRET` | Dowolny losowy, trudny do odgadnięcia ciąg znaków. Można go wygenerować poleceniem `openssl rand -hex 32`. Wartość ta trafia do parametru `secret` podczas konfiguracji webhooków i zabezpiecza endpointy przed nieautoryzowanym użyciem. |
+| `DATABASE_URL` | Adres połączenia z bazą PostgreSQL w formacie `postgresql+asyncpg://user:password@host:port/database`. W środowisku Docker Compose domyślny wpis z `.env.example` będzie poprawny. |
 
-(For production you would configure Telegram webhooks to hit the `/telegram/{bot_token}` endpoint.)
-
+Pozostałe wartości (limity, ceny, ustawienia logowania) można zostawić domyślne lub dostosować do potrzeb. Aplikacja wspiera „hot reload” konfiguracji – zmiana `.env` i ponowne przeładowanie zmiennych środowiskowych (np. restart procesu lub odczyt w harmonogramie) aktualizuje limity w locie.
 
 ## Migracje bazy danych
 
-Projekt zawiera wstępnie skonfigurowane środowisko Alembic (`alembic.ini` oraz katalog `alembic/`). Aby zsynchronizować schemat bazy z modelami, ustaw zmienną środowiskową `DATABASE_URL` (np. `export DATABASE_URL=postgresql+asyncpg://user:pass@localhost:5432/dbname`) i uruchom:
+Repozytorium zawiera gotową konfigurację Alembic (`alembic.ini` oraz katalog `alembic/`). Aby zsynchronizować schemat bazy z modelami:
 
 ```bash
 alembic upgrade head
 ```
 
-Jeśli rozpoczynasz zupełnie nowy projekt i katalog `alembic/` nie istnieje, można go odtworzyć poleceniem `alembic init alembic`. W tym repozytorium nie jest to konieczne – struktura migracji jest gotowa do użycia.
+Pamiętaj o ustawieniu zmiennej `DATABASE_URL` przed uruchomieniem polecenia (np. `export DATABASE_URL=postgresql+asyncpg://user:pass@localhost:5432/dbname`).
 
-## Running with Docker Compose
+## Testy
 
-Build the application image and start the stack (web app + PostgreSQL):
-
-```bash
-cp .env.example .env
-docker compose up --build
-```
-
-The application service waits for the database service to report a healthy status before booting, so migrations or schema initialization can run safely.
-
-When database migrations are introduced, apply them inside the container (after the services are up) with:
-
-```bash
-docker compose run --rm app alembic upgrade head
-```
-
-Shut everything down with:
-
-```bash
-docker compose down
-```
-
-## Testing
-
-Tests are not included yet. Suggested command:
+Na ten moment repozytorium nie zawiera testów automatycznych. Proponowane polecenie do uruchamiania własnych testów:
 
 ```bash
 pytest
