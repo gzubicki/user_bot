@@ -58,6 +58,29 @@ uvicorn bot_platform.telegram.webhooks:app --reload
 
 (For production you would configure Telegram webhooks to hit the `/telegram/{bot_token}` endpoint.)
 
+## Running with Docker Compose
+
+Build the application image and start the stack (web app + PostgreSQL):
+
+```bash
+cp .env.example .env
+docker compose up --build
+```
+
+The application service waits for the database service to report a healthy status before booting, so migrations or schema initialization can run safely.
+
+When database migrations are introduced, apply them inside the container (after the services are up) with:
+
+```bash
+docker compose run --rm app alembic upgrade head
+```
+
+Shut everything down with:
+
+```bash
+docker compose down
+```
+
 ## Testing
 
 Tests are not included yet. Suggested command:
