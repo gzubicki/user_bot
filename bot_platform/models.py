@@ -6,6 +6,7 @@ from datetime import datetime, timedelta
 from typing import Any, Optional
 
 from sqlalchemy import (
+    BigInteger,
     Boolean,
     CheckConstraint,
     DateTime,
@@ -40,6 +41,23 @@ class SubscriptionPlan(enum.StrEnum):
     MONTHLY = "monthly"
     YEARLY = "yearly"
     FREE = "free"
+
+
+class AdminChat(Base):
+    __tablename__ = "admin_chats"
+
+    id: Mapped[int] = mapped_column(Integer, primary_key=True, autoincrement=True)
+    chat_id: Mapped[int] = mapped_column(BigInteger, unique=True, index=True, nullable=False)
+    title: Mapped[Optional[str]] = mapped_column(String(255), default=None)
+    created_at: Mapped[datetime] = mapped_column(DateTime(timezone=True), default=datetime.utcnow, nullable=False)
+    is_active: Mapped[bool] = mapped_column(Boolean, default=True, nullable=False)
+
+    moderation_actions: Mapped[list["ModerationAction"]] = relationship(
+        "ModerationAction", back_populates="admin_chat"
+    )
+    granted_subscriptions: Mapped[list["BotChatSubscription"]] = relationship(
+        "BotChatSubscription", back_populates="granted_in_chat"
+    )
 
 
 class Bot(Base):
@@ -80,21 +98,24 @@ class PersonaAlias(Base):
     id: Mapped[int] = mapped_column(Integer, primary_key=True, autoincrement=True)
     persona_id: Mapped[int] = mapped_column(ForeignKey("personas.id", ondelete="CASCADE"), nullable=False)
     alias: Mapped[str] = mapped_column(String(255), nullable=False)
-    added_by_admin_id: Mapped[Optional[int]] = mapped_column(ForeignKey("admins.id", ondelete="SET NULL"), nullable=True)
+    added_by_user_id: Mapped[Optional[int]] = mapped_column(BigInteger, nullable=True)
+    added_in_chat_id: Mapped[Optional[int]] = mapped_column(
+        ForeignKey("admin_chats.id", ondelete="SET NULL"), nullable=True
+    )
     added_at: Mapped[datetime] = mapped_column(DateTime(timezone=True), default=datetime.utcnow, nullable=False)
     removed_at: Mapped[Optional[datetime]] = mapped_column(DateTime(timezone=True), default=None)
-    removed_by_admin_id: Mapped[Optional[int]] = mapped_column(ForeignKey("admins.id", ondelete="SET NULL"), nullable=True)
+    removed_by_user_id: Mapped[Optional[int]] = mapped_column(BigInteger, nullable=True)
+    removed_in_chat_id: Mapped[Optional[int]] = mapped_column(
+        ForeignKey("admin_chats.id", ondelete="SET NULL"), nullable=True
+    )
 
     persona: Mapped["Persona"] = relationship("Persona", back_populates="aliases")
-
-
-class Admin(Base):
-    __tablename__ = "admins"
-
-    id: Mapped[int] = mapped_column(Integer, primary_key=True, autoincrement=True)
-    telegram_user_id: Mapped[int] = mapped_column(Integer, unique=True, nullable=False)
-    username: Mapped[Optional[str]] = mapped_column(String(255), default=None)
-    joined_at: Mapped[datetime] = mapped_column(DateTime(timezone=True), default=datetime.utcnow, nullable=False)
+    added_in_chat: Mapped[Optional[AdminChat]] = relationship(
+        "AdminChat", foreign_keys=[added_in_chat_id]
+    )
+    removed_in_chat: Mapped[Optional[AdminChat]] = relationship(
+        "AdminChat", foreign_keys=[removed_in_chat_id]
+    )
 
 
 class Submission(Base):
@@ -106,8 +127,8 @@ class Submission(Base):
 
     id: Mapped[int] = mapped_column(Integer, primary_key=True, autoincrement=True)
     persona_id: Mapped[int] = mapped_column(ForeignKey("personas.id", ondelete="CASCADE"), nullable=False)
-    submitted_by_user_id: Mapped[int] = mapped_column(Integer, nullable=False)
-    submitted_chat_id: Mapped[int] = mapped_column(Integer, nullable=False)
+    submitted_by_user_id: Mapped[int] = mapped_column(BigInteger, nullable=False)
+    submitted_chat_id: Mapped[int] = mapped_column(BigInteger, nullable=False)
     media_type: Mapped[MediaType] = mapped_column(Enum(MediaType), nullable=False)
     text_content: Mapped[Optional[str]] = mapped_column(Text)
     file_id: Mapped[Optional[str]] = mapped_column(String(255))
@@ -115,11 +136,17 @@ class Submission(Base):
     status: Mapped[ModerationStatus] = mapped_column(Enum(ModerationStatus), default=ModerationStatus.PENDING, nullable=False)
     created_at: Mapped[datetime] = mapped_column(DateTime(timezone=True), default=datetime.utcnow, nullable=False)
     decided_at: Mapped[Optional[datetime]] = mapped_column(DateTime(timezone=True))
-    decided_by_admin_id: Mapped[Optional[int]] = mapped_column(ForeignKey("admins.id", ondelete="SET NULL"))
+    decided_by_user_id: Mapped[Optional[int]] = mapped_column(BigInteger, nullable=True)
+    decided_in_chat_id: Mapped[Optional[int]] = mapped_column(
+        ForeignKey("admin_chats.id", ondelete="SET NULL"), nullable=True
+    )
     rejection_reason: Mapped[Optional[str]] = mapped_column(Text)
 
     persona: Mapped["Persona"] = relationship("Persona")
     moderation_actions: Mapped[list["ModerationAction"]] = relationship("ModerationAction", back_populates="submission")
+    decided_in_chat: Mapped[Optional[AdminChat]] = relationship(
+        "AdminChat", foreign_keys=[decided_in_chat_id]
+    )
 
 
 class Quote(Base):
@@ -148,12 +175,18 @@ class ModerationAction(Base):
 
     id: Mapped[int] = mapped_column(Integer, primary_key=True, autoincrement=True)
     submission_id: Mapped[int] = mapped_column(ForeignKey("submissions.id", ondelete="CASCADE"), nullable=False)
-    admin_id: Mapped[Optional[int]] = mapped_column(ForeignKey("admins.id", ondelete="SET NULL"), nullable=True)
+    performed_by_user_id: Mapped[Optional[int]] = mapped_column(BigInteger, nullable=True)
+    admin_chat_id: Mapped[Optional[int]] = mapped_column(
+        ForeignKey("admin_chats.id", ondelete="SET NULL"), nullable=True
+    )
     action: Mapped[ModerationStatus] = mapped_column(Enum(ModerationStatus), nullable=False)
     created_at: Mapped[datetime] = mapped_column(DateTime(timezone=True), default=datetime.utcnow, nullable=False)
     notes: Mapped[Optional[str]] = mapped_column(Text)
 
     submission: Mapped["Submission"] = relationship("Submission", back_populates="moderation_actions")
+    admin_chat: Mapped[Optional[AdminChat]] = relationship(
+        "AdminChat", back_populates="moderation_actions", foreign_keys=[admin_chat_id]
+    )
 
 
 class BotChatSubscription(Base):
@@ -165,14 +198,20 @@ class BotChatSubscription(Base):
 
     id: Mapped[int] = mapped_column(Integer, primary_key=True, autoincrement=True)
     bot_id: Mapped[int] = mapped_column(ForeignKey("bots.id", ondelete="CASCADE"), nullable=False)
-    chat_id: Mapped[int] = mapped_column(Integer, nullable=False)
+    chat_id: Mapped[int] = mapped_column(BigInteger, nullable=False)
     plan: Mapped[SubscriptionPlan] = mapped_column(Enum(SubscriptionPlan), nullable=False)
     started_at: Mapped[datetime] = mapped_column(DateTime(timezone=True), default=datetime.utcnow, nullable=False)
     expires_at: Mapped[Optional[datetime]] = mapped_column(DateTime(timezone=True))
     is_active: Mapped[bool] = mapped_column(Boolean, default=True, nullable=False)
-    granted_by_admin_id: Mapped[Optional[int]] = mapped_column(ForeignKey("admins.id", ondelete="SET NULL"), nullable=True)
+    granted_by_user_id: Mapped[Optional[int]] = mapped_column(BigInteger, nullable=True)
+    granted_in_chat_id: Mapped[Optional[int]] = mapped_column(
+        ForeignKey("admin_chats.id", ondelete="SET NULL"), nullable=True
+    )
 
     bot: Mapped["Bot"] = relationship("Bot", back_populates="chats")
+    granted_in_chat: Mapped[Optional[AdminChat]] = relationship(
+        "AdminChat", back_populates="granted_subscriptions", foreign_keys=[granted_in_chat_id]
+    )
 
     @property
     def remaining_time(self) -> Optional[timedelta]:
@@ -189,7 +228,7 @@ class SubscriptionLedger(Base):
 
     id: Mapped[int] = mapped_column(Integer, primary_key=True, autoincrement=True)
     bot_id: Mapped[int] = mapped_column(ForeignKey("bots.id", ondelete="CASCADE"), nullable=False)
-    chat_id: Mapped[Optional[int]] = mapped_column(Integer)
+    chat_id: Mapped[Optional[int]] = mapped_column(BigInteger)
     plan: Mapped[SubscriptionPlan] = mapped_column(Enum(SubscriptionPlan), nullable=False)
     amount_stars: Mapped[int] = mapped_column(Integer, nullable=False)
     transaction_id: Mapped[Optional[str]] = mapped_column(String(255))
@@ -207,6 +246,6 @@ class AuditLog(Base):
     id: Mapped[int] = mapped_column(Integer, primary_key=True, autoincrement=True)
     event_type: Mapped[str] = mapped_column(String(64), nullable=False)
     created_at: Mapped[datetime] = mapped_column(DateTime(timezone=True), default=datetime.utcnow, nullable=False)
-    actor_user_id: Mapped[Optional[int]] = mapped_column(Integer)
-    actor_chat_id: Mapped[Optional[int]] = mapped_column(Integer)
+    actor_user_id: Mapped[Optional[int]] = mapped_column(BigInteger)
+    actor_chat_id: Mapped[Optional[int]] = mapped_column(BigInteger)
     payload: Mapped[dict[str, Any]] = mapped_column(JSONB, nullable=False)

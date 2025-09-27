@@ -39,12 +39,16 @@ def upgrade() -> None:
     )
 
     op.create_table(
-        "admins",
+        "admin_chats",
         sa.Column("id", sa.Integer(), primary_key=True, nullable=False),
-        sa.Column("telegram_user_id", sa.Integer(), nullable=False),
-        sa.Column("username", sa.String(length=255), nullable=True),
-        sa.Column("joined_at", sa.DateTime(timezone=True), nullable=False),
-        sa.UniqueConstraint("telegram_user_id", name="uq_admins_telegram_user_id"),
+        sa.Column("chat_id", sa.BigInteger(), nullable=False),
+        sa.Column("title", sa.String(length=255), nullable=True),
+        sa.Column("created_at", sa.DateTime(timezone=True), nullable=False),
+        sa.Column("is_active", sa.Boolean(), nullable=False),
+        sa.UniqueConstraint("chat_id", name="uq_admin_chats_chat_id"),
+    )
+    op.create_index(
+        "ix_admin_chats_chat_id", "admin_chats", ["chat_id"], unique=False
     )
 
     op.create_table(
@@ -70,18 +74,20 @@ def upgrade() -> None:
         sa.Column("id", sa.Integer(), primary_key=True, nullable=False),
         sa.Column("persona_id", sa.Integer(), nullable=False),
         sa.Column("alias", sa.String(length=255), nullable=False),
-        sa.Column("added_by_admin_id", sa.Integer(), nullable=True),
+        sa.Column("added_by_user_id", sa.BigInteger(), nullable=True),
+        sa.Column("added_in_chat_id", sa.Integer(), nullable=True),
         sa.Column("added_at", sa.DateTime(timezone=True), nullable=False),
         sa.Column("removed_at", sa.DateTime(timezone=True), nullable=True),
-        sa.Column("removed_by_admin_id", sa.Integer(), nullable=True),
+        sa.Column("removed_by_user_id", sa.BigInteger(), nullable=True),
+        sa.Column("removed_in_chat_id", sa.Integer(), nullable=True),
         sa.ForeignKeyConstraint(
             ["persona_id"], ["personas.id"], ondelete="CASCADE"
         ),
         sa.ForeignKeyConstraint(
-            ["added_by_admin_id"], ["admins.id"], ondelete="SET NULL"
+            ["added_in_chat_id"], ["admin_chats.id"], ondelete="SET NULL"
         ),
         sa.ForeignKeyConstraint(
-            ["removed_by_admin_id"], ["admins.id"], ondelete="SET NULL"
+            ["removed_in_chat_id"], ["admin_chats.id"], ondelete="SET NULL"
         ),
         sa.UniqueConstraint("persona_id", "alias", name="uq_alias_per_persona"),
     )
@@ -91,8 +97,8 @@ def upgrade() -> None:
         "submissions",
         sa.Column("id", sa.Integer(), primary_key=True, nullable=False),
         sa.Column("persona_id", sa.Integer(), nullable=False),
-        sa.Column("submitted_by_user_id", sa.Integer(), nullable=False),
-        sa.Column("submitted_chat_id", sa.Integer(), nullable=False),
+        sa.Column("submitted_by_user_id", sa.BigInteger(), nullable=False),
+        sa.Column("submitted_chat_id", sa.BigInteger(), nullable=False),
         sa.Column("media_type", media_type_enum, nullable=False),
         sa.Column("text_content", sa.Text(), nullable=True),
         sa.Column("file_id", sa.String(length=255), nullable=True),
@@ -100,13 +106,14 @@ def upgrade() -> None:
         sa.Column("status", moderation_status_enum, nullable=False),
         sa.Column("created_at", sa.DateTime(timezone=True), nullable=False),
         sa.Column("decided_at", sa.DateTime(timezone=True), nullable=True),
-        sa.Column("decided_by_admin_id", sa.Integer(), nullable=True),
+        sa.Column("decided_by_user_id", sa.BigInteger(), nullable=True),
+        sa.Column("decided_in_chat_id", sa.Integer(), nullable=True),
         sa.Column("rejection_reason", sa.Text(), nullable=True),
         sa.ForeignKeyConstraint(
             ["persona_id"], ["personas.id"], ondelete="CASCADE"
         ),
         sa.ForeignKeyConstraint(
-            ["decided_by_admin_id"], ["admins.id"], ondelete="SET NULL"
+            ["decided_in_chat_id"], ["admin_chats.id"], ondelete="SET NULL"
         ),
     )
     op.create_index(
@@ -141,7 +148,8 @@ def upgrade() -> None:
         "moderation_actions",
         sa.Column("id", sa.Integer(), primary_key=True, nullable=False),
         sa.Column("submission_id", sa.Integer(), nullable=False),
-        sa.Column("admin_id", sa.Integer(), nullable=True),
+        sa.Column("performed_by_user_id", sa.BigInteger(), nullable=True),
+        sa.Column("admin_chat_id", sa.Integer(), nullable=True),
         sa.Column("action", moderation_status_enum, nullable=False),
         sa.Column("created_at", sa.DateTime(timezone=True), nullable=False),
         sa.Column("notes", sa.Text(), nullable=True),
@@ -149,7 +157,7 @@ def upgrade() -> None:
             ["submission_id"], ["submissions.id"], ondelete="CASCADE"
         ),
         sa.ForeignKeyConstraint(
-            ["admin_id"], ["admins.id"], ondelete="SET NULL"
+            ["admin_chat_id"], ["admin_chats.id"], ondelete="SET NULL"
         ),
     )
 
@@ -157,15 +165,16 @@ def upgrade() -> None:
         "bot_chat_subscriptions",
         sa.Column("id", sa.Integer(), primary_key=True, nullable=False),
         sa.Column("bot_id", sa.Integer(), nullable=False),
-        sa.Column("chat_id", sa.Integer(), nullable=False),
+        sa.Column("chat_id", sa.BigInteger(), nullable=False),
         sa.Column("plan", subscription_plan_enum, nullable=False),
         sa.Column("started_at", sa.DateTime(timezone=True), nullable=False),
         sa.Column("expires_at", sa.DateTime(timezone=True), nullable=True),
         sa.Column("is_active", sa.Boolean(), nullable=False),
-        sa.Column("granted_by_admin_id", sa.Integer(), nullable=True),
+        sa.Column("granted_by_user_id", sa.BigInteger(), nullable=True),
+        sa.Column("granted_in_chat_id", sa.Integer(), nullable=True),
         sa.ForeignKeyConstraint(["bot_id"], ["bots.id"], ondelete="CASCADE"),
         sa.ForeignKeyConstraint(
-            ["granted_by_admin_id"], ["admins.id"], ondelete="SET NULL"
+            ["granted_in_chat_id"], ["admin_chats.id"], ondelete="SET NULL"
         ),
         sa.UniqueConstraint("bot_id", "chat_id", name="uq_bot_chat"),
     )
@@ -180,7 +189,7 @@ def upgrade() -> None:
         "subscription_ledger",
         sa.Column("id", sa.Integer(), primary_key=True, nullable=False),
         sa.Column("bot_id", sa.Integer(), nullable=False),
-        sa.Column("chat_id", sa.Integer(), nullable=True),
+        sa.Column("chat_id", sa.BigInteger(), nullable=True),
         sa.Column("plan", subscription_plan_enum, nullable=False),
         sa.Column("amount_stars", sa.Integer(), nullable=False),
         sa.Column("transaction_id", sa.String(length=255), nullable=True),
@@ -200,8 +209,8 @@ def upgrade() -> None:
         sa.Column("id", sa.Integer(), primary_key=True, nullable=False),
         sa.Column("event_type", sa.String(length=64), nullable=False),
         sa.Column("created_at", sa.DateTime(timezone=True), nullable=False),
-        sa.Column("actor_user_id", sa.Integer(), nullable=True),
-        sa.Column("actor_chat_id", sa.Integer(), nullable=True),
+        sa.Column("actor_user_id", sa.BigInteger(), nullable=True),
+        sa.Column("actor_chat_id", sa.BigInteger(), nullable=True),
         sa.Column("payload", postgresql.JSONB(astext_type=sa.Text()), nullable=False),
         sa.CheckConstraint(
             "length(event_type) > 0", name="ck_event_type_not_empty"
@@ -240,7 +249,8 @@ def downgrade() -> None:
     op.drop_index("ix_bots_token_hash", table_name="bots")
     op.drop_table("bots")
 
-    op.drop_table("admins")
+    op.drop_index("ix_admin_chats_chat_id", table_name="admin_chats")
+    op.drop_table("admin_chats")
 
     op.drop_table("personas")
 
