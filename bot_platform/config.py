@@ -3,9 +3,7 @@ from __future__ import annotations
 
 from functools import lru_cache
 from pathlib import Path
-from typing import Iterable, List
-
-from pydantic import BaseModel, Field, field_validator
+from pydantic import BaseModel, Field
 from pydantic_settings import BaseSettings, SettingsConfigDict
 
 
@@ -44,7 +42,6 @@ class LoggingSettings(BaseModel):
 class Settings(BaseSettings):
     model_config = SettingsConfigDict(env_file=".env", env_file_encoding="utf-8", extra="ignore")
 
-    bot_tokens: List[str] = Field(..., alias="BOT_TOKENS")
     webhook_secret: str = Field(..., alias="WEBHOOK_SECRET")
     database_url: str = Field(..., alias="DATABASE_URL")
     admin_chat_ids: List[int] = Field(default_factory=list, alias="ADMIN_CHAT_IDS")

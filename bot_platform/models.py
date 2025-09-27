@@ -64,6 +64,9 @@ class Bot(Base):
     __tablename__ = "bots"
 
     id: Mapped[int] = mapped_column(Integer, primary_key=True, autoincrement=True)
+    api_token: Mapped[Optional[str]] = mapped_column(
+        String(255), unique=True, index=True, nullable=True
+    )
     token_hash: Mapped[str] = mapped_column(String(128), unique=True, index=True)
     display_name: Mapped[str] = mapped_column(String(255))
     persona_id: Mapped[int] = mapped_column(ForeignKey("personas.id", ondelete="RESTRICT"), nullable=False)
