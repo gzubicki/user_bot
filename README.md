@@ -86,10 +86,16 @@ README.md
    ```bash
    docker compose up --build
    ```
-3. Po uruchomieniu usług (kontener `postgres` uzyska status „healthy”) możesz wejść do kontenera aplikacji i uruchomić migracje:
+   Jeśli zmienisz `Dockerfile`, dla pewności przebuduj obraz poleceniem `docker compose build app` przed kolejnym krokiem.
+3. Po uruchomieniu usług (kontener `postgres` uzyska status „healthy”) wykonaj migracje bezpośrednio na działającym kontenerze aplikacji:
+   ```bash
+   docker compose exec app alembic upgrade head
+   ```
+   Jeżeli preferujesz jednorazowy kontener, możesz użyć:
    ```bash
    docker compose run --rm app alembic upgrade head
    ```
+   (Czas pierwszego uruchomienia może być dłuższy, bo obraz zostanie przebudowany z uwzględnieniem plików Alembica.)
 4. Zatrzymanie całego stosu:
    ```bash
    docker compose down
