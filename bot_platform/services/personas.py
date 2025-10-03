@@ -26,7 +26,8 @@ async def add_alias(
     persona: Persona,
     alias: str,
     *,
-    admin_id: Optional[int],
+    admin_user_id: Optional[int],
+    admin_chat_id: Optional[int],
 ) -> PersonaAlias:
     existing = (
         await session.execute(
@@ -39,18 +40,27 @@ async def add_alias(
         return existing
 
     alias_record = existing or PersonaAlias(persona_id=persona.id, alias=alias)
-    alias_record.added_by_admin_id = admin_id
+    alias_record.added_by_user_id = admin_user_id
+    alias_record.added_in_chat_id = admin_chat_id
     alias_record.added_at = datetime.utcnow()
     alias_record.removed_at = None
-    alias_record.removed_by_admin_id = None
+    alias_record.removed_by_user_id = None
+    alias_record.removed_in_chat_id = None
     session.add(alias_record)
     await session.flush()
     return alias_record
 
 
-async def remove_alias(session: AsyncSession, alias_record: PersonaAlias, *, admin_id: Optional[int]) -> PersonaAlias:
+async def remove_alias(
+    session: AsyncSession,
+    alias_record: PersonaAlias,
+    *,
+    admin_user_id: Optional[int],
+    admin_chat_id: Optional[int],
+) -> PersonaAlias:
     alias_record.removed_at = datetime.utcnow()
-    alias_record.removed_by_admin_id = admin_id
+    alias_record.removed_by_user_id = admin_user_id
+    alias_record.removed_in_chat_id = admin_chat_id
     await session.flush()
     return alias_record
 

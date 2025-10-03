@@ -48,12 +48,31 @@ class Settings(BaseSettings):
 
     webhook_secret: str = Field(..., alias="WEBHOOK_SECRET")
     database_url: str = Field(..., alias="DATABASE_URL")
+    admin_chat_ids: List[int] = Field(default_factory=list, alias="ADMIN_CHAT_IDS")
 
     subscription: SubscriptionSettings
     rate_limits: RateLimitSettings
     scheduler: SchedulerSettings
     moderation: ModerationSettings
     logging: LoggingSettings
+
+    @field_validator("bot_tokens", mode="before")
+    @classmethod
+    def split_tokens(cls, value: Iterable[str] | str) -> List[str]:
+        if isinstance(value, str):
+            return [token.strip() for token in value.split(",") if token.strip()]
+        return list(value)
+
+    @field_validator("admin_chat_ids", mode="before")
+    @classmethod
+    def parse_chat_ids(cls, value: Iterable[int | str] | str | None) -> List[int]:
+        if value is None:
+            return []
+        if isinstance(value, str):
+            parts = [item.strip() for item in value.split(",") if item.strip()]
+            return [int(item) for item in parts]
+        return [int(item) for item in value]
+
 
 def _settings_source(env_file: str | Path | None = None) -> Settings:
     return Settings(_env_file=env_file)

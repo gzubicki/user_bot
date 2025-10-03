@@ -23,7 +23,8 @@ async def decide_submission(
     session: AsyncSession,
     submission: Submission,
     *,
-    admin_id: Optional[int],
+    moderator_user_id: Optional[int],
+    moderator_chat_id: Optional[int],
     action: ModerationStatus,
     notes: str | None = None,
 ) -> Submission:
@@ -32,12 +33,14 @@ async def decide_submission(
 
     submission.status = action
     submission.decided_at = datetime.utcnow()
-    submission.decided_by_admin_id = admin_id
+    submission.decided_by_user_id = moderator_user_id
+    submission.decided_in_chat_id = moderator_chat_id
     submission.rejection_reason = notes if action == ModerationStatus.REJECTED else None
 
     moderation_action = ModerationAction(
         submission_id=submission.id,
-        admin_id=admin_id,
+        performed_by_user_id=moderator_user_id,
+        admin_chat_id=moderator_chat_id,
         action=action,
         notes=notes,
     )

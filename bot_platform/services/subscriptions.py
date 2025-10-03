@@ -26,7 +26,8 @@ async def ensure_chat_subscription(
     chat_id: int,
     *,
     plan: SubscriptionPlan,
-    granted_by_admin_id: Optional[int] = None,
+    granted_by_user_id: Optional[int] = None,
+    granted_in_chat_id: Optional[int] = None,
     transaction_id: Optional[str] = None,
     amount_stars: Optional[int] = None,
 ) -> BotChatSubscription:
@@ -46,7 +47,8 @@ async def ensure_chat_subscription(
             started_at=datetime.utcnow(),
             expires_at=expires_at,
             is_active=True,
-            granted_by_admin_id=granted_by_admin_id,
+            granted_by_user_id=granted_by_user_id,
+            granted_in_chat_id=granted_in_chat_id,
         )
         session.add(subscription)
     else:
@@ -54,7 +56,8 @@ async def ensure_chat_subscription(
         subscription.started_at = datetime.utcnow()
         subscription.expires_at = expires_at
         subscription.is_active = True
-        subscription.granted_by_admin_id = granted_by_admin_id
+        subscription.granted_by_user_id = granted_by_user_id
+        subscription.granted_in_chat_id = granted_in_chat_id
 
     ledger_entry = SubscriptionLedger(
         bot_id=bot.id,
