@@ -74,6 +74,10 @@ README.md
      Rekord możesz dodać np. za pomocą konsoli psql lub narzędzia `alembic revision --autogenerate` przygotowującego seed.
    - Wystaw publiczny adres HTTPS (np. za pomocą [ngrok](https://ngrok.com/)).
    - W `.env` ustaw zmienną `ADMIN_CHAT_IDS` na listę identyfikatorów czatów (grup/prywatnych kanałów), w których znajdują się moderatorzy. Każda osoba obecna na tych czatach otrzyma w systemie uprawnienia administracyjne.
+6. **Skonfiguruj boty i webhooki Telegrama**
+   - Upewnij się, że w tabeli `bots` znajdują się wpisy z uzupełnionym polem `api_token` oraz ustawioną flagą `is_active=true`.
+     Rekord możesz dodać np. za pomocą konsoli psql lub narzędzia `alembic revision --autogenerate` przygotowującego seed.
+   - Wystaw publiczny adres HTTPS (np. za pomocą [ngrok](https://ngrok.com/)).
    - Dla każdego tokena z bazy ustaw webhook na adres:
      ```
      https://twoj-host/telegram/<TOKEN_BOTA>?secret=<WEBHOOK_SECRET>
