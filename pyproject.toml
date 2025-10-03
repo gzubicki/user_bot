@@ -32,3 +32,22 @@ dev = [
     "ruff>=0.3.4",
     "mypy>=1.9.0"
 ]
+
+[tool.ruff]
+target-version = "py311"
+line-length = 100
+extend-exclude = ["alembic"]
+
+[tool.ruff.lint]
+select = [
+    "E",  # błędy PEP8
+    "F",  # potencjalne błędy w Pythonie
+    "B",  # bugi z flake8-bugbear
+    "I",  # sortowanie importów
+]
+ignore = [
+    "E402",  # dopuszczamy importy po innych instrukcjach w plikach konfiguracyjnych
+]
+
+[tool.ruff.lint.isort]
+known-first-party = ["bot_platform"]

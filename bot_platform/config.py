@@ -3,7 +3,9 @@ from __future__ import annotations
 
 from functools import lru_cache
 from pathlib import Path
-from pydantic import BaseModel, Field
+from typing import Iterable, List
+
+from pydantic import BaseModel, Field, field_validator
 from pydantic_settings import BaseSettings, SettingsConfigDict
 
 
@@ -49,6 +51,7 @@ class Settings(BaseSettings):
     webhook_secret: str = Field(..., alias="WEBHOOK_SECRET")
     database_url: str = Field(..., alias="DATABASE_URL")
     admin_chat_ids: List[int] = Field(default_factory=list, alias="ADMIN_CHAT_IDS")
+    bot_tokens: List[str] = Field(default_factory=list, alias="BOT_TOKENS")
 
     subscription: SubscriptionSettings
     rate_limits: RateLimitSettings
@@ -58,10 +61,12 @@ class Settings(BaseSettings):
 
     @field_validator("bot_tokens", mode="before")
     @classmethod
-    def split_tokens(cls, value: Iterable[str] | str) -> List[str]:
+    def split_tokens(cls, value: Iterable[str] | str | None) -> List[str]:
+        if value is None:
+            return []
         if isinstance(value, str):
             return [token.strip() for token in value.split(",") if token.strip()]
-        return list(value)
+        return [token.strip() for token in value if str(token).strip()]
 
     @field_validator("admin_chat_ids", mode="before")
     @classmethod
@@ -72,7 +77,6 @@ class Settings(BaseSettings):
             parts = [item.strip() for item in value.split(",") if item.strip()]
             return [int(item) for item in parts]
         return [int(item) for item in value]
-
 
 def _settings_source(env_file: str | Path | None = None) -> Settings:
     return Settings(_env_file=env_file)
