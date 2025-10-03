@@ -15,6 +15,7 @@ from ..config import get_settings
 class DispatcherBundle:
     dispatcher: Dispatcher
     bot: Bot
+    moderator_chat_id: int
     bot_id: Optional[int] = None
     display_name: Optional[str] = None
 
@@ -34,8 +35,13 @@ def build_dispatcher(
     dispatcher['bot_display_name'] = display_name or token.split(':', 1)[0]
     dispatcher['webhook_secret'] = settings.webhook_secret
     dispatcher['bot_id'] = bot_id
+    dispatcher['moderator_chat_id'] = settings.moderation.moderator_chat_id
     return DispatcherBundle(
-        dispatcher=dispatcher, bot=bot, bot_id=bot_id, display_name=display_name
+        dispatcher=dispatcher,
+        bot=bot,
+        bot_id=bot_id,
+        display_name=display_name,
+        moderator_chat_id=settings.moderation.moderator_chat_id,
     )
 
 
