@@ -35,6 +35,10 @@ class SchedulerSettings(BaseModel):
     backup_retention_days: int = Field(..., alias="BACKUP_RETENTION_DAYS")
 
 
+class ModerationSettings(BaseModel):
+    moderator_chat_id: int = Field(..., alias="MODERATION_CHAT_ID")
+
+
 class LoggingSettings(BaseModel):
     level: str = Field("INFO", alias="LOG_LEVEL")
 
@@ -48,6 +52,7 @@ class Settings(BaseSettings):
     subscription: SubscriptionSettings
     rate_limits: RateLimitSettings
     scheduler: SchedulerSettings
+    moderation: ModerationSettings
     logging: LoggingSettings
 
 def _settings_source(env_file: str | Path | None = None) -> Settings:
@@ -73,6 +78,7 @@ __all__ = [
     "SubscriptionSettings",
     "RateLimitSettings",
     "SchedulerSettings",
+    "ModerationSettings",
     "LoggingSettings",
     "get_settings",
     "reload_settings",
