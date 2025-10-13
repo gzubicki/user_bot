@@ -90,12 +90,14 @@ README.md
    ```bash
    cp .env.example .env
    ```
-2. Zbuduj obraz i wystartuj usługi (aplikacja + PostgreSQL):
+2. (Opcjonalnie) jeżeli port `8000` na hoście jest zajęty, ustaw w `.env` zmienną `APP_HOST_PORT` na wolny numer (np. `8080`).
+
+3. Zbuduj obraz i wystartuj usługi (aplikacja + PostgreSQL):
    ```bash
    docker compose up --build
    ```
    Jeśli zmienisz `Dockerfile`, dla pewności przebuduj obraz poleceniem `docker compose build app` przed kolejnym krokiem.
-3. Po uruchomieniu usług (kontener `postgres` uzyska status „healthy”) wykonaj migracje bezpośrednio na działającym kontenerze aplikacji:
+4. Po uruchomieniu usług (kontener `postgres` uzyska status „healthy”) wykonaj migracje bezpośrednio na działającym kontenerze aplikacji:
    ```bash
    docker compose exec app alembic upgrade head
    ```
@@ -104,7 +106,7 @@ README.md
    docker compose run --rm app alembic upgrade head
    ```
    (Czas pierwszego uruchomienia może być dłuższy, bo obraz zostanie przebudowany z uwzględnieniem plików Alembica.)
-4. Zatrzymanie całego stosu:
+5. Zatrzymanie całego stosu:
    ```bash
    docker compose down
    ```
