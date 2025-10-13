@@ -214,3 +214,22 @@ Na ten moment repozytorium nie zawiera testów automatycznych. Proponowane polec
 ```bash
 pytest
 ```
+
+## Autodeploy (GitHub Actions)
+
+Repozytorium zawiera workflow `.github/workflows/deploy.yml`, który po każdym pushu do gałęzi `production`:
+
+- uruchamia testy (`pytest`) na Pythonie 3.11,
+- po sukcesie loguje się na serwer produkcyjny przez SSH i odświeża kontenery Docker Compose.
+
+Aby go włączyć, ustaw w ustawieniach repozytorium sekrety GitHub Actions:
+
+| Sekret | Opis |
+| --- | --- |
+| `PROD_HOST` | Adres IP lub domena serwera produkcyjnego. |
+| `PROD_USER` | Użytkownik z uprawnieniami do wykonywania poleceń Docker na serwerze. |
+| `PROD_SSH_KEY` | Prywatny klucz SSH (format PEM) przypisany do powyższego użytkownika. |
+| `PROD_APP_PATH` | Ścieżka do katalogu projektu na serwerze (np. `/opt/user_bot`). |
+
+Workflow zakłada, że na serwerze działają `git` oraz `docker compose`, a plik `.env` jest już skonfigurowany.
+W razie potrzeby możesz odpalić deploy ręcznie przez „Run workflow” (akcja `workflow_dispatch`).
