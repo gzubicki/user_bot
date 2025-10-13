@@ -12,7 +12,7 @@ Platforma stanowi fundament do uruchomienia wielu botów Telegrama, które odgry
 
 ## Czat administracyjny
 
-Zamiast utrzymywać listę pojedynczych administratorów, platforma zakłada, że moderacja odbywa się na dedykowanych czatach Telegrama. W bazie danych rejestrowane są identyfikatory tych czatów (`admin_chats`), a każda osoba uczestnicząca w którymkolwiek z nich posiada prawa administratora. Przy rejestrowaniu działań (moderacja, przydzielanie subskrypcji, operacje na aliasach) zapisywany jest identyfikator użytkownika Telegrama oraz czatu, na którym podjęto akcję. Dzięki temu można łatwo rozszerzyć logikę o synchronizację członków czatu lub audyt działań poszczególnych moderatorów.
+Platforma opiera się na jednym czacie administracyjnym w Telegramie. Jego identyfikator należy ustawić w zmiennej środowiskowej `ADMIN_CHAT_ID`. Każdy uczestnik tego czatu zyskuje uprawnienia moderatorskie, a wykonane akcje zapisują identyfikatory użytkownika i czatu bezpośrednio w polach dzienników (`*_chat_id`). Takie podejście umożliwia audyt działań bez utrzymywania dodatkowych tabel referencyjnych.
 
 ## Struktura repozytorium
 
@@ -38,55 +38,66 @@ README.md
 .env.example
 ```
 
-## Szybki start (lokalne środowisko)
+## Szybki start (Docker Compose)
 
-1. **Sklonuj repozytorium i wejdź do katalogu projektu**
+1. **Sklonuj repozytorium i przejdź do katalogu projektu**
    ```bash
    git clone <adres_repo>
    cd user_bot
    ```
-2. **Utwórz wirtualne środowisko (Python 3.11+) i zainstaluj zależności**
-   ```bash
-   python -m venv .venv
-   source .venv/bin/activate
-   pip install -e .[dev]
-   ```
-3. **Skopiuj plik konfiguracyjny i przygotuj zmienne środowiskowe**
+2. **Skopiuj plik konfiguracyjny**
    ```bash
    cp .env.example .env
    ```
-   Następnie zaktualizuj `.env` zgodnie z sekcją [Zmienne środowiskowe](#zmienne-środowiskowe--źródła-i-wskazówki).
-4. **Uruchom migracje bazy danych (opcjonalnie przy pierwszym starcie)**
-   Ustaw `DATABASE_URL` w `.env` (np. dla lokalnej bazy `postgresql+asyncpg://postgres:postgres@localhost:5432/user_bot`) i wykonaj:
+   Uzupełnij w nim co najmniej `WEBHOOK_SECRET`, `ADMIN_CHAT_ID` (identyfikator jedynego czatu administracyjnego) oraz wartości połączenia z bazą danych, jeśli chcesz skorzystać z zewnętrznego klastra PostgreSQL.
+3. **Zbuduj i uruchom stos aplikacji**
    ```bash
-   alembic upgrade head
+   docker compose up --build
    ```
-5. **Uruchom aplikację FastAPI z webhookami**
+   Komenda utworzy kontenery aplikacji (`app`) i bazy (`postgres`) oraz wystawi interfejs HTTP na porcie wskazanym w `.env` (`APP_HOST_PORT`, domyślnie `8000`).
+4. **Wykonaj migracje schematu**
+   Po starcie usług zainicjalizuj bazę poleceniem:
    ```bash
-   uvicorn bot_platform.telegram.webhooks:app --reload
+   docker compose exec app alembic upgrade head
    ```
-6. **Skonfiguruj boty i boty i listę czatów administracyjnych i boty i webhooki Telegrama**
-   - Upewnij się, że w tabeli `bots` znajdują się wpisy z uzupełnionym polem `api_token` oraz ustawioną flagą `is_active=true`.
-     Rekord możesz dodać np. za pomocą konsoli psql lub narzędzia `alembic revision --autogenerate` przygotowującego seed.
-   - Upewnij się, że w tabeli `bots` znajdują się wpisy z uzupełnionym polem `api_token` oraz ustawioną flagą `is_active=true`.
-     Rekord możesz dodać np. za pomocą konsoli psql lub narzędzia `alembic revision --autogenerate` przygotowującego seed.
-   - Upewnij się, że w tabeli `bots` znajdują się wpisy z uzupełnionym polem `api_token` oraz ustawioną flagą `is_active=true`.
-     Rekord możesz dodać np. za pomocą konsoli psql lub narzędzia `alembic revision --autogenerate` przygotowującego seed.
-   - Wystaw publiczny adres HTTPS (np. za pomocą [ngrok](https://ngrok.com/)).
-   - W `.env` ustaw zmienną `ADMIN_CHAT_IDS` na listę identyfikatorów czatów (grup/prywatnych kanałów), w których znajdują się moderatorzy. Każda osoba obecna na tych czatach otrzyma w systemie uprawnienia administracyjne.
-6. **Skonfiguruj boty i webhooki Telegrama**
-   - Upewnij się, że w tabeli `bots` znajdują się wpisy z uzupełnionym polem `api_token` oraz ustawioną flagą `is_active=true`.
-     Rekord możesz dodać np. za pomocą konsoli psql lub narzędzia `alembic revision --autogenerate` przygotowującego seed.
-   - Wystaw publiczny adres HTTPS (np. za pomocą [ngrok](https://ngrok.com/)).
-   - Dla każdego tokena z bazy ustaw webhook na adres:
-     ```
-     https://twoj-host/telegram/<TOKEN_BOTA>?secret=<WEBHOOK_SECRET>
-     ```
-   - Sekret (`WEBHOOK_SECRET`) musi zgadzać się z wartością w `.env`.
+5. **Skonfiguruj webhooki Telegrama**
+   Udostępnij aplikację pod publicznym adresem HTTPS (np. przy pomocy [ngrok](https://ngrok.com/)) i dla każdego zarządzanego bota ustaw webhook:
+   ```
+   https://twoj-host/telegram/<TOKEN_BOTA>?secret=<WEBHOOK_SECRET>
+   ```
+   Sekret w adresie musi odpowiadać wartości `WEBHOOK_SECRET` w `.env`.
+
+## Dodawanie botów
+
+Rejestrowanie botów odbywa się wyłącznie z poziomu czatu administracyjnego wskazanego w `ADMIN_CHAT_ID`.
+
+1. Upewnij się, że bot operatorski platformy został dodany do czatu administracyjnego i wywołaj w nim komendę `/start`.
+2. Z menu bota wybierz akcję „Dodaj bota” (lub odpowiadającą jej komendę tekstową) i wklej token otrzymany od [@BotFather](https://t.me/BotFather).
+3. Wybierz lub utwórz personę, która ma być przypisana do nowego bota. Platforma poprosi o opis i język, aby spójnie odpowiadać użytkownikom.
+4. Po zatwierdzeniu bot jest zapisywany w bazie danych i natychmiast dostępny. W razie potrzeby możesz wymusić przeładowanie cache tokenów wywołując endpoint:
+   ```bash
+   curl -X POST \
+        -H "X-Telegram-Bot-Api-Secret-Token: ${WEBHOOK_SECRET}" \
+        http://localhost:8000/internal/reload-config
+   ```
+
+Manualne modyfikacje w bazie danych (np. poprzez `INSERT`) nie są wspierane i mogą zostać nadpisane przez logikę czatu administracyjnego.
+
+## Jak sprawdzić, czy aplikacja działa poprawnie?
+
+1. **Kontrola zdrowia serwisu** – wywołaj endpoint `/healthz` bez nagłówków uwierzytelniających:
+   ```bash
+   curl http://localhost:8000/healthz
+   ```
+   Jeśli wszystko działa, otrzymasz odpowiedź podobną do `{"status": "ok", "bots": 1}` – liczba w polu `bots` oznacza, ile aktywnych tokenów wczytano z bazy.
+
+2. **Inspekcja API** – odwiedź [http://localhost:8000/docs](http://localhost:8000/docs), aby upewnić się, że FastAPI wystawia dokumentację OpenAPI i endpointy działają.
+
+3. **Szybki test webhooka** – po ustawieniu webhooków w Telegramie możesz wysłać wiadomość do bota i obserwować logi aplikacji (`uvicorn` wypisze zdarzenia przychodzące). W przypadku problemów sprawdź nagłówki `X-Telegram-Bot-Api-Secret-Token` i upewnij się, że pokrywają się z `WEBHOOK_SECRET`.
 
 ## Uruchomienie przez Docker Compose
 
-1. Skopiuj plik konfiguracyjny i wypełnij zmienne jak w [Szybkim starcie](#szybki-start-lokalne-środowisko):
+1. Skopiuj plik konfiguracyjny i wypełnij zmienne jak w [Szybkim starcie](#szybki-start-docker-compose):
    ```bash
    cp .env.example .env
    ```
@@ -118,7 +129,7 @@ Po skopiowaniu `.env.example` uzupełnij przede wszystkim poniższe wpisy:
 | Zmienna | Jak zdobyć / rekomendowana wartość |
 | --- | --- |
 | `WEBHOOK_SECRET` | Dowolny losowy, trudny do odgadnięcia ciąg znaków. Można go wygenerować poleceniem `openssl rand -hex 32`. Wartość ta trafia do parametru `secret` podczas konfiguracji webhooków i zabezpiecza endpointy przed nieautoryzowanym użyciem. |
-| `ADMIN_CHAT_IDS` | Lista identyfikatorów czatów administracyjnych w Telegramie (oddzielonych przecinkami). Każdy uczestnik tych czatów jest traktowany jako administrator, a jego działania będą rejestrowane z użyciem identyfikatora użytkownika. |
+| `ADMIN_CHAT_ID` | Identyfikator jedynego czatu administracyjnego w Telegramie. Wszyscy uczestnicy tego czatu uzyskują uprawnienia moderatorskie, a ich akcje są rejestrowane z użyciem surowego ID czatu. |
 | `DATABASE_URL` | Adres połączenia z bazą PostgreSQL w formacie `postgresql+asyncpg://user:password@host:port/database`. W środowisku Docker Compose domyślny wpis z `.env.example` będzie poprawny. |
 | `MODERATION_CHAT_ID` | Liczbowe ID czatu (lub kanału) Telegram, w którym moderatorzy mają otrzymywać powiadomienia. Najłatwiej je pozyskać wysyłając dowolną wiadomość do bota `@userinfobot` z danego czatu lub korzystając z narzędzi typu [@RawDataBot](https://t.me/RawDataBot). |
 
