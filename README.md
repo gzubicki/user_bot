@@ -96,7 +96,7 @@ Manualne modyfikacje w bazie danych (np. poprzez `INSERT`) nie są wspierane i m
 3. **Szybki test webhooka** – po ustawieniu webhooków w Telegramie możesz wysłać wiadomość do bota i obserwować logi aplikacji (`uvicorn` wypisze zdarzenia przychodzące). W przypadku problemów sprawdź nagłówki `X-Telegram-Bot-Api-Secret-Token` i upewnij się, że pokrywają się z `WEBHOOK_SECRET`.
 6. **Skonfiguruj boty i webhooki Telegrama**
    - Upewnij się, że w tabeli `bots` znajdują się wpisy z uzupełnionym polem `api_token` oraz ustawioną flagą `is_active=true` (szczegóły znajdziesz w sekcji [Dodawanie pierwszego bota](#dodawanie-pierwszego-bota)).
-   - W `.env` ustaw zmienną `ADMIN_CHAT_IDS` na listę identyfikatorów czatów (grup/prywatnych kanałów), w których znajdują się moderatorzy. Każda osoba obecna na tych czatach otrzyma w systemie uprawnienia administracyjne.
+   - W `.env` ustaw zmienną `ADMIN_CHAT_ID` na identyfikator jedynego czatu administracyjnego. Wszyscy uczestnicy tego czatu uzyskają uprawnienia moderatorskie.
    - Wystaw publiczny adres HTTPS (np. za pomocą [ngrok](https://ngrok.com/)).
    - Dla każdego tokena z bazy ustaw webhook na adres:
      ```
