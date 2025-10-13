@@ -1,21 +1,35 @@
 #!/usr/bin/env bash
 set -euo pipefail
 
-REPO_PATH="/opt/user_bot"
+SCRIPT_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
+REPO_DIR="${REPO_DIR:-$SCRIPT_DIR}"
+ENV_FILE="${ENV_FILE:-$REPO_DIR/.env}"
 
-cd "$REPO_PATH"
+# wczytaj zmienne z .env (jeśli istnieje) – tak jak w content_manager
+set -a
+[[ -f "$ENV_FILE" ]] && . "$ENV_FILE"
+set +a
 
-echo "[deploy] Fetching production branch"
-git fetch origin production
-git pull --ff-only origin production
+cd "$REPO_DIR"
 
-echo "[deploy] Pulling latest images"
+
+# jeśli podane GHCR_USER/GHCR_PAT/IMAGE i brak logowania – zaloguj jak w content_manager
+if [[ -n "${GHCR_USER:-}" && -n "${GHCR_PAT:-}" && -n "${IMAGE:-}" ]]; then
+  if ! docker pull "$IMAGE" >/dev/null 2>&1; then
+    echo "🔐 Logowanie do ghcr.io…" >&2
+    echo "$GHCR_PAT" | docker login ghcr.io -u "$GHCR_USER" --password-stdin
+  fi
+fi
+echo "🚀 Deploy: aktualizacja kontenerów" >&2
+
 docker compose pull
 
-echo "[deploy] Rebuilding and restarting"
 docker compose up -d --build
 
-echo "[deploy] Removing unused images"
-docker image prune -f
+echo "🔄 Migracje Alembic" >&2
+docker compose run --rm app alembic upgrade head
 
-echo "[deploy] Done"
+echo "🧹 Czyszczenie nieużywanych obrazów" >&2
+docker image prune -f >/dev/null
+
+echo "✅ Deploy zakończony powodzeniem" >&2

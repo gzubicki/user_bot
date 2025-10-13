@@ -178,9 +178,10 @@ Po wykonaniu migracji baza danych jest pusta. Aby zarejestrować pierwszego bota
 ## Reverse proxy (Nginx)
 
 W katalogu `deploy/nginx` znajdziesz przykładową konfigurację `bot.content.run.place.conf`,
-która kieruje ruch z domeny `bot.content.run.place` do kontenera `app` nasłuchującego na porcie 8100.
-Skopiuj plik na serwer, zaktualizuj ścieżki certyfikatów TLS (jeśli korzystasz z HTTPS) i włącz go w Nginx,
-np. poprzez stworzenie symlinka w `sites-enabled`.
+która (analogicznie do `content_manager`) zawiera blok HTTP→HTTPS, lokalizację dla Certbota oraz proxy
+do kontenera `app` nasłuchującego na porcie 8100.
+Skopiuj plik na serwer, uaktualnij ścieżki certyfikatów (np. `/etc/letsencrypt/live/bot.content.run.place/...`),
+ewentualnie zmień katalog ACME i włącz konfigurację w Nginx – np. poprzez symlinka w `sites-enabled`.
 
 ## Zmienne środowiskowe – źródła i wskazówki
 
@@ -236,4 +237,35 @@ W razie potrzeby możesz odpalić deploy ręcznie przez „Run workflow” (akcj
 
 ## Deploy script
 
-Na serwerze możesz uruchomić `./deploy.sh` (domyślnie w `/opt/user_bot`). Skrypt wykonuje kolejno `git pull`, `docker compose pull`, `docker compose up -d --build` oraz sprzątanie obrazów – ten sam zestaw poleceń wywołuje pipeline GitHub Actions. Jeśli repozytorium znajduje się w innym katalogu, zaktualizuj zmienną `REPO_PATH` w skrypcie.
+Na serwerze możesz uruchomić `./deploy.sh`. Skrypt automatycznie wczytuje zmienne z `.env`,
+wykonuje `docker compose pull`, `docker compose up -d --build`, uruchamia migracje Alembic
+(`docker compose run --rm app alembic upgrade head`) oraz sprząta obrazy (`docker image prune -f`).
+Jeżeli repozytorium znajduje się w innym katalogu niż katalog skryptu, ustaw zmienną
+`REPO_DIR=/ścieżka/do/user_bot` przed uruchomieniem.
+
+Na serwerze możesz także skopiować `deploy/.env.production` do `/opt/user_bot/.env` i ewentualnie zaktualizować wartości dla środowiska produkcyjnego (np. `DATABASE_URL`, `WEBHOOK_SECRET`). Skrypt `deploy.sh` automatycznie wczyta ten plik podczas uruchomienia.
+
+## HTTPS / certyfikaty Let's Encrypt
+
+1. Skopiuj plik `deploy/nginx/bot.content.run.place.conf` na serwer jako `/etc/nginx/sites-available/bot.content.run.place`.
+2. Upewnij się, że sekcja HTTP zawiera: `location /.well-known/acme-challenge/ { root /var/www/html; }` (lub inny katalog webroot).
+3. Uruchom Certbota w trybie webroot, np.:
+   ```bash
+   sudo certbot certonly --webroot \\
+     -w /var/www/html \\
+     -d bot.content.run.place
+   ```
+   Certyfikaty trafią do `/etc/letsencrypt/live/bot.content.run.place/`.
+4. W pliku Nginx w sekcji HTTPS ustaw:
+   ```nginx
+   ssl_certificate     /etc/letsencrypt/live/bot.content.run.place/fullchain.pem;
+   ssl_certificate_key /etc/letsencrypt/live/bot.content.run.place/privkey.pem;
+   ```
+   Jeśli używasz innego katalogu webroot, zaktualizuj też ścieżki w blokach ACME.
+5. Utwórz symlink i włącz vhost:
+   ```bash
+   sudo ln -s /etc/nginx/sites-available/bot.content.run.place \\
+             /etc/nginx/sites-enabled/bot.content.run.place
+   ```
+6. Sprawdź konfigurację (`sudo nginx -t`) i przeładuj serwer: `sudo systemctl reload nginx`.
+7. Upewnij się, że proces odnowienia certyfikatów (cron/systemd timer Certbota) korzysta z tego samego webroota.
