@@ -233,3 +233,7 @@ Aby go włączyć, ustaw w ustawieniach repozytorium sekrety GitHub Actions:
 
 Workflow zakłada, że na serwerze działają `git` oraz `docker compose`, a plik `.env` jest już skonfigurowany.
 W razie potrzeby możesz odpalić deploy ręcznie przez „Run workflow” (akcja `workflow_dispatch`).
+
+## Deploy script
+
+Na serwerze możesz uruchomić `./deploy.sh` (domyślnie w `/opt/user_bot`). Skrypt wykonuje kolejno `git pull`, `docker compose pull`, `docker compose up -d --build` oraz sprzątanie obrazów – ten sam zestaw poleceń wywołuje pipeline GitHub Actions. Jeśli repozytorium znajduje się w innym katalogu, zaktualizuj zmienną `REPO_PATH` w skrypcie.
