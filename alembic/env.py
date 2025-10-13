@@ -3,6 +3,7 @@ from __future__ import annotations
 
 import asyncio
 import os
+from configparser import ConfigParser
 from logging.config import fileConfig
 
 from alembic import context
@@ -16,7 +17,14 @@ from bot_platform.models import Base
 config = context.config
 
 if config.config_file_name is not None:
-    fileConfig(config.config_file_name)
+    parser = ConfigParser()
+    parser.read(config.config_file_name)
+    if (
+        parser.has_section("loggers")
+        and parser.has_section("handlers")
+        and parser.has_section("formatters")
+    ):
+        fileConfig(config.config_file_name)
 
 # Metadane modeli, wykorzystywane w trybie autogeneracji.
 target_metadata = Base.metadata

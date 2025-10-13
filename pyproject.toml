@@ -51,3 +51,7 @@ ignore = [
 
 [tool.ruff.lint.isort]
 known-first-party = ["bot_platform"]
+
+[tool.setuptools.packages.find]
+include = ["bot_platform*"]
+exclude = ["alembic", "alembic.*"]

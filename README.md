@@ -94,6 +94,79 @@ Manualne modyfikacje w bazie danych (np. poprzez `INSERT`) nie są wspierane i m
 2. **Inspekcja API** – odwiedź [http://localhost:8000/docs](http://localhost:8000/docs), aby upewnić się, że FastAPI wystawia dokumentację OpenAPI i endpointy działają.
 
 3. **Szybki test webhooka** – po ustawieniu webhooków w Telegramie możesz wysłać wiadomość do bota i obserwować logi aplikacji (`uvicorn` wypisze zdarzenia przychodzące). W przypadku problemów sprawdź nagłówki `X-Telegram-Bot-Api-Secret-Token` i upewnij się, że pokrywają się z `WEBHOOK_SECRET`.
+6. **Skonfiguruj boty i webhooki Telegrama**
+   - Upewnij się, że w tabeli `bots` znajdują się wpisy z uzupełnionym polem `api_token` oraz ustawioną flagą `is_active=true` (szczegóły znajdziesz w sekcji [Dodawanie pierwszego bota](#dodawanie-pierwszego-bota)).
+   - W `.env` ustaw zmienną `ADMIN_CHAT_IDS` na listę identyfikatorów czatów (grup/prywatnych kanałów), w których znajdują się moderatorzy. Każda osoba obecna na tych czatach otrzyma w systemie uprawnienia administracyjne.
+   - Wystaw publiczny adres HTTPS (np. za pomocą [ngrok](https://ngrok.com/)).
+   - Dla każdego tokena z bazy ustaw webhook na adres:
+     ```
+     https://twoj-host/telegram/<TOKEN_BOTA>?secret=<WEBHOOK_SECRET>
+     ```
+   - Sekret (`WEBHOOK_SECRET`) musi zgadzać się z wartością w `.env`.
+
+## Dodawanie pierwszego bota
+
+Po wykonaniu migracji baza danych jest pusta. Aby zarejestrować pierwszego bota oraz nadać mu personę i czaty administracyjne, wykonaj poniższe kroki (przykład zakłada użycie `psql` i lokalnej bazy `user_bot`).
+
+1. **Dodaj czat administracyjny** – każdy uczestnik tego czatu będzie miał uprawnienia administratora w panelu moderatorów.
+   ```sql
+   INSERT INTO admin_chats (chat_id, title, created_at, is_active)
+   VALUES (-1001234567890, 'Moderatorzy', NOW(), TRUE)
+   ON CONFLICT (chat_id) DO NOTHING;
+   ```
+
+2. **Utwórz personę** – boty muszą być powiązane z personami opisującymi ich charakter.
+   ```sql
+   INSERT INTO personas (name, description, language, created_at, is_active)
+   VALUES ('Cytaty klasyków', 'Bot cytujący klasyków literatury', 'pl', NOW(), TRUE)
+   RETURNING id;
+   ```
+   Zanotuj wartość `id`, będzie potrzebna w kolejnym kroku.
+
+3. **Przygotuj hash tokena** – kolumna `token_hash` przechowuje kryptograficzny skrót tokena. Użyj `sha512`, aby zachować zgodność z limitem 128 znaków:
+   ```bash
+   python - <<'PY'
+   import hashlib
+
+   token = "1234567890:ABCDEF"  # wstaw token wygenerowany przez @BotFather
+   print(hashlib.sha512(token.encode()).hexdigest())
+   PY
+   ```
+   Skopiuj wynik (128-znakowy ciąg hex).
+
+4. **Dodaj bota** – uzupełnij pola `api_token`, `token_hash` oraz przypisz wcześniej utworzoną personę.
+   ```sql
+   INSERT INTO bots (api_token, token_hash, display_name, persona_id, created_at, is_active)
+   VALUES (
+       '1234567890:ABCDEF',
+       '<WYNIK_SHA512>',
+       'Cytaty klasyków',
+       <ID_PERSONY>,
+       NOW(),
+       TRUE
+   )
+   RETURNING id;
+   ```
+
+5. **Przeładuj cache tokenów** – aby działająca aplikacja od razu wczytała nowego bota, wywołaj endpoint reload (podstaw swój sekret i adres hosta):
+   ```bash
+   curl -X POST \
+        -H "X-Telegram-Bot-Api-Secret-Token: ${WEBHOOK_SECRET}" \
+        http://localhost:8000/internal/reload-config
+   ```
+   Oczekuj odpowiedzi `{"status": "reloaded"}`.
+
+## Jak sprawdzić, czy aplikacja działa poprawnie?
+
+1. **Kontrola zdrowia serwisu** – wywołaj endpoint `/healthz` bez nagłówków uwierzytelniających:
+   ```bash
+   curl http://localhost:8000/healthz
+   ```
+   Jeśli wszystko działa, otrzymasz odpowiedź podobną do `{"status": "ok", "bots": 1}` – liczba w polu `bots` oznacza, ile aktywnych tokenów wczytano z bazy.
+
+2. **Inspekcja API** – odwiedź [http://localhost:8000/docs](http://localhost:8000/docs), aby upewnić się, że FastAPI wystawia dokumentację OpenAPI i endpointy działają.
+
+3. **Szybki test webhooka** – po ustawieniu webhooków w Telegramie możesz wysłać wiadomość do bota i obserwować logi aplikacji (`uvicorn` wypisze zdarzenia przychodzące). W przypadku problemów sprawdź nagłówki `X-Telegram-Bot-Api-Secret-Token` i upewnij się, że pokrywają się z `WEBHOOK_SECRET`.
 
 ## Uruchomienie przez Docker Compose
 
