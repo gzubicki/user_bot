@@ -12,12 +12,14 @@ branch_labels = None
 depends_on = None
 
 
-media_type_enum = postgresql.ENUM("text", "image", "audio", name="mediatype")
+media_type_enum = postgresql.ENUM(
+    "text", "image", "audio", name="mediatype", create_type=False
+)
 moderation_status_enum = postgresql.ENUM(
-    "pending", "approved", "rejected", name="moderationstatus"
+    "pending", "approved", "rejected", name="moderationstatus", create_type=False
 )
 subscription_plan_enum = postgresql.ENUM(
-    "monthly", "yearly", "free", name="subscriptionplan"
+    "monthly", "yearly", "free", name="subscriptionplan", create_type=False
 )
 
 

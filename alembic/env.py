@@ -8,9 +8,8 @@ from logging.config import fileConfig
 
 from alembic import context
 from sqlalchemy.engine import Connection
-from sqlalchemy.ext.asyncio import AsyncEngine
+from sqlalchemy.ext.asyncio import AsyncEngine, create_async_engine
 
-from bot_platform.database import get_engine
 from bot_platform.models import Base
 
 # Alembic Config object, dostępny w pliku ini.
@@ -73,7 +72,9 @@ def do_run_migrations(connection: Connection) -> None:
 
 async def run_migrations_online() -> None:
     """Wykonuje migracje w trybie online z użyciem asynchronicznego silnika."""
-    connectable: AsyncEngine = get_engine()
+    # Build dedicated engine for migrations to avoid loading full application settings.
+    database_url = _get_sqlalchemy_url()
+    connectable: AsyncEngine = create_async_engine(database_url, pool_pre_ping=True)
 
     async with connectable.connect() as connection:
         await connection.run_sync(do_run_migrations)
