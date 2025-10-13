@@ -54,7 +54,7 @@ README.md
    ```bash
    docker compose up --build
    ```
-   Komenda utworzy kontenery aplikacji (`app`) i bazy (`postgres`) oraz wystawi interfejs HTTP na porcie wskazanym w `.env` (`APP_HOST_PORT`, domyślnie `8000`).
+   Komenda utworzy kontenery aplikacji (`app`) i bazy (`postgres`) oraz wystawi interfejs HTTP na porcie wskazanym w `.env` (`APP_HOST_PORT`, domyślnie `8100`).
 4. **Wykonaj migracje schematu**
    Po starcie usług zainicjalizuj bazę poleceniem:
    ```bash
@@ -106,55 +106,35 @@ Manualne modyfikacje w bazie danych (np. poprzez `INSERT`) nie są wspierane i m
 
 ## Dodawanie pierwszego bota
 
-Po wykonaniu migracji baza danych jest pusta. Aby zarejestrować pierwszego bota oraz nadać mu personę i czaty administracyjne, wykonaj poniższe kroki (przykład zakłada użycie `psql` i lokalnej bazy `user_bot`).
+Po wykonaniu migracji baza danych jest pusta. Aby zarejestrować pierwszego bota operatorskiego i uruchomić panel administracyjny:
 
-1. **Dodaj czat administracyjny** – każdy uczestnik tego czatu będzie miał uprawnienia administratora w panelu moderatorów.
-   ```sql
-   INSERT INTO admin_chats (chat_id, title, created_at, is_active)
-   VALUES (-1001234567890, 'Moderatorzy', NOW(), TRUE)
-   ON CONFLICT (chat_id) DO NOTHING;
-   ```
+1. **Skonfiguruj czat administracyjny w `.env`.**  
+   Ustaw `ADMIN_CHAT_ID` na identyfikator jedynego czatu administracyjnego (np. prywatnej grupy). Po zapisaniu pliku zrestartuj kontener `app` lub wywołaj endpoint `/internal/reload-config`, aby aplikacja wczytała nowe ustawienia.
 
-2. **Utwórz personę** – boty muszą być powiązane z personami opisującymi ich charakter.
-   ```sql
-   INSERT INTO personas (name, description, language, created_at, is_active)
-   VALUES ('Cytaty klasyków', 'Bot cytujący klasyków literatury', 'pl', NOW(), TRUE)
-   RETURNING id;
-   ```
-   Zanotuj wartość `id`, będzie potrzebna w kolejnym kroku.
-
-3. **Przygotuj hash tokena** – kolumna `token_hash` przechowuje kryptograficzny skrót tokena. Użyj `sha512`, aby zachować zgodność z limitem 128 znaków:
+2. **Uruchom skrypt bootstrapujący bota operatorskiego.**  
+   Skrypt tworzy (jeśli trzeba) personę operatorską i zapisuje token bota w tabeli `bots`. Uruchom go w kontenerze aplikacji:
    ```bash
-   python - <<'PY'
-   import hashlib
-
-   token = "1234567890:ABCDEF"  # wstaw token wygenerowany przez @BotFather
-   print(hashlib.sha512(token.encode()).hexdigest())
-   PY
+   docker compose run --rm app \
+     python -m bot_platform.scripts.bootstrap_operator_bot "<TOKEN_Z_BOTFATHER>" \
+     --display-name "Bot operatorski" \
+     --persona-name "Persona operatorska" \
+     --language "pl"
    ```
-   Skopiuj wynik (128-znakowy ciąg hex).
+   Jeśli bot z podanym tokenem już istnieje, wpis zostanie zaktualizowany (token otrzyma nową nazwę/personę, a flaga `is_active` zostanie ustawiona na `true`).
 
-4. **Dodaj bota** – uzupełnij pola `api_token`, `token_hash` oraz przypisz wcześniej utworzoną personę.
-   ```sql
-   INSERT INTO bots (api_token, token_hash, display_name, persona_id, created_at, is_active)
-   VALUES (
-       '1234567890:ABCDEF',
-       '<WYNIK_SHA512>',
-       'Cytaty klasyków',
-       <ID_PERSONY>,
-       NOW(),
-       TRUE
-   )
-   RETURNING id;
-   ```
-
-5. **Przeładuj cache tokenów** – aby działająca aplikacja od razu wczytała nowego bota, wywołaj endpoint reload (podstaw swój sekret i adres hosta):
+3. **Przeładuj cache tokenów (opcjonalnie, ale zalecane po bootstrapie).**
    ```bash
    curl -X POST \
         -H "X-Telegram-Bot-Api-Secret-Token: ${WEBHOOK_SECRET}" \
         http://localhost:8000/internal/reload-config
    ```
-   Oczekuj odpowiedzi `{"status": "reloaded"}`.
+   Po tej operacji bot operatorski będzie dostępny w interfejsie.
+
+4. **Dodaj bota operatorskiego do czatu i otwórz panel.**  
+   Zaproś bota na skonfigurowany czat administracyjny, wyślij `/start` i korzystaj z menu kontekstowego. Od tej chwili wszystkie dalsze operacje (tworzenie person, dodawanie kolejnych botów, zarządzanie nimi) wykonujesz już z poziomu czatu.
+
+5. **Skonfiguruj webhooki dla nowych botów.**  
+   Użyj procedury opisanej w sekcji [Skonfiguruj boty i webhooki Telegrama](#skonfiguruj-boty-i-webhooki-telegrama), aby każdy bot otrzymał poprawny adres webhooka i wspólny `WEBHOOK_SECRET`.
 
 ## Jak sprawdzić, czy aplikacja działa poprawnie?
 
@@ -174,7 +154,7 @@ Po wykonaniu migracji baza danych jest pusta. Aby zarejestrować pierwszego bota
    ```bash
    cp .env.example .env
    ```
-2. (Opcjonalnie) jeżeli port `8000` na hoście jest zajęty, ustaw w `.env` zmienną `APP_HOST_PORT` na wolny numer (np. `8080`).
+2. (Opcjonalnie) jeżeli port `8100` na hoście jest zajęty, ustaw w `.env` zmienną `APP_HOST_PORT` na wolny numer (np. `8080`).
 
 3. Zbuduj obraz i wystartuj usługi (aplikacja + PostgreSQL):
    ```bash
@@ -194,6 +174,13 @@ Po wykonaniu migracji baza danych jest pusta. Aby zarejestrować pierwszego bota
    ```bash
    docker compose down
    ```
+
+## Reverse proxy (Nginx)
+
+W katalogu `deploy/nginx` znajdziesz przykładową konfigurację `bot.content.run.place.conf`,
+która kieruje ruch z domeny `bot.content.run.place` do kontenera `app` nasłuchującego na porcie 8100.
+Skopiuj plik na serwer, zaktualizuj ścieżki certyfikatów TLS (jeśli korzystasz z HTTPS) i włącz go w Nginx,
+np. poprzez stworzenie symlinka w `sites-enabled`.
 
 ## Zmienne środowiskowe – źródła i wskazówki
 
