@@ -16,6 +16,7 @@ services:
       start_period: 5s
 
   app:
+    image: "${IMAGE:-user_bot_app}"
     build: .
     restart: unless-stopped
     working_dir: /app

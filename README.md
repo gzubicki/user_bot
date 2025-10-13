@@ -243,6 +243,15 @@ wykonuje `docker compose pull`, `docker compose up -d --build`, uruchamia migrac
 Jeżeli repozytorium znajduje się w innym katalogu niż katalog skryptu, ustaw zmienną
 `REPO_DIR=/ścieżka/do/user_bot` przed uruchomieniem.
 
+Skrypt sprawdza teraz, czy we wskazanym katalogu dostępny jest plik(a) Docker Compose (domyślnie
+`docker-compose.yml`, można go nadpisać zmienną `COMPOSE_FILE`). Przy jego braku zostanie
+zwrócony czytelny komunikat zamiast komunikatu z `docker compose`.
+
+Jeżeli ustawisz zmienną `IMAGE`, zostanie ona użyta jako źródło obrazu aplikacji – skrypt wykona
+logowanie do GHCR (jeśli podano `GHCR_USER` i `GHCR_PAT`), pobierze obraz i uruchomi kontenery
+bez przebudowy lokalnej (`docker compose up --no-build`). Aby wymusić budowanie mimo ustawionego
+obrazu, ustaw `FORCE_BUILD=1`.
+
 Na serwerze możesz także skopiować `deploy/.env.production` do `/opt/user_bot/.env` i ewentualnie zaktualizować wartości dla środowiska produkcyjnego (np. `DATABASE_URL`, `WEBHOOK_SECRET`). Skrypt `deploy.sh` automatycznie wczyta ten plik podczas uruchomienia.
 
 ## HTTPS / certyfikaty Let's Encrypt
