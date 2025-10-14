@@ -5,7 +5,7 @@ Platforma stanowi fundament do uruchomienia wielu botów Telegrama, które odgry
 ## Najważniejsze funkcje
 
 - **Obsługa wielu botów** – pojedynczy backend obsługuje wiele tokenów botów, a każdy bot posiada własną personę.
-- **Treści od społeczności** – użytkownicy przesyłają wiadomości (tekst, obraz, audio), a administratorzy (wszyscy uczestnicy wskazanych czatów administracyjnych) zatwierdzają zgłoszenia.
+- **Treści od społeczności** – użytkownicy wysyłają cytaty (tekst, zdjęcia, nagrania audio) bezpośrednio do bota; trafiają one do kolejki moderacyjnej, a po zatwierdzeniu zasilają bazę cytatów danej persony.
 - **Model subskrypcji** – jednorazowa opłata aktywacyjna (50 Telegram Stars) oraz miesięczna opłata per czat (10 Stars), z możliwością przydzielania darmowych slotów przez administratorów.
 - **Hot-reload konfiguracji** – limity i ceny przechowywane są w zmiennych środowiskowych i mogą być przeładowywane bez restartu serwera.
 - **Przyjazne audytom dane** – schemat PostgreSQL przechowuje persony, aliasy, zgłoszenia, wyniki moderacji, subskrypcje oraz log audytowy.
@@ -87,6 +87,13 @@ W razie potrzeby możesz też wymusić przeładowanie cache tokenów wywołując
    ```
 
 Manualne modyfikacje w bazie danych (np. poprzez `INSERT`) nie są wspierane i mogą zostać nadpisane przez logikę czatu administracyjnego.
+
+## Przesyłanie cytatów i moderacja
+
+- **Użytkownicy** wysyłają wiadomości bezpośrednio do zwykłego bota (tekst, zdjęcia lub nagrania audio). Bot potwierdza przyjęcie i zapisuje zgłoszenie w tabeli `submissions` z przypisaną personą.
+- **Administratorzy** w czacie administratorskim korzystają z nowego przycisku „🗳 Moderacja”. System pokazuje kolejne zgłoszenia (wraz z treścią i metadanymi) oraz przyciski „✅ Zatwierdź”, „❌ Odrzuć” i „⏭ Pomiń”.
+- **Akceptacja** tworzy automatycznie rekord w `quotes` (połączony z `submissions.source_submission_id`) i wysyła autorowi powiadomienie o sukcesie. Odrzucając, moderator może podać powód – użytkownik otrzyma odpowiednią wiadomość.
+- **Pominięte** zgłoszenia nie zmieniają statusu i pozostają w kolejce, aby można było wrócić do nich później.
 
 ## Jak sprawdzić, czy aplikacja działa poprawnie?
 

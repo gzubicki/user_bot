@@ -21,6 +21,7 @@ class ActiveBotToken:
     bot_id: int
     token: str
     display_name: str
+    persona_id: int
 
 
 _TOKEN_CACHE: Dict[str, ActiveBotToken] = {}
@@ -31,14 +32,14 @@ _CACHE_TTL = timedelta(seconds=60)
 async def _load_tokens_from_db() -> Dict[str, ActiveBotToken]:
     async with get_session() as session:
         result = await session.execute(
-            select(Bot.id, Bot.api_token, Bot.display_name).where(Bot.is_active.is_(True))
+            select(Bot.id, Bot.api_token, Bot.display_name, Bot.persona_id).where(Bot.is_active.is_(True))
         )
         rows = result.all()
     tokens: Dict[str, ActiveBotToken] = {}
-    for bot_id, api_token, display_name in rows:
+    for bot_id, api_token, display_name, persona_id in rows:
         if api_token:
             tokens[api_token] = ActiveBotToken(
-                bot_id=bot_id, token=api_token, display_name=display_name
+                bot_id=bot_id, token=api_token, display_name=display_name, persona_id=persona_id
             )
     return tokens
 
