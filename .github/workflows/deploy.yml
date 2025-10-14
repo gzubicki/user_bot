@@ -62,7 +62,6 @@ jobs:
           username: ${{ secrets.VPS_USER }}
           key: ${{ secrets.VPS_SSH_KEY }}
           script: |
-            set -eo pipefail
             APP_PATH="${{ secrets.VPS_APP_PATH }}"
             if [ -z "$APP_PATH" ]; then
               APP_PATH="${{ secrets.PROD_APP_PATH }}"
@@ -70,20 +69,26 @@ jobs:
             if [ -z "$APP_PATH" ]; then
               APP_PATH="${{ env.DEFAULT_APP_PATH }}"
             fi
-            cd "$APP_PATH"
-            git fetch origin production
-            git pull --ff-only origin production
-            GHCR_PAT_VALUE="${{ secrets.GHCR_PAT }}"
-            if [ -n "$GHCR_PAT_VALUE" ]; then
-              export GHCR_PAT="$GHCR_PAT_VALUE"
-              export GHCR_USER="${{ github.repository_owner }}"
+            export APP_PATH
+
+            USER_BOT_GHCR_PAT="${{ secrets.GHCR_PAT }}"
+            if [ -n "$USER_BOT_GHCR_PAT" ]; then
+              export USER_BOT_GHCR_PAT
+              export USER_BOT_GHCR_USER="${{ github.repository_owner }}"
             fi
-            VPS_IMAGE_VALUE="${{ secrets.VPS_IMAGE }}"
-            if [ -z "$VPS_IMAGE_VALUE" ]; then
-              VPS_IMAGE_VALUE="${{ secrets.PROD_IMAGE }}"
+
+            USER_BOT_IMAGE_VALUE="${{ secrets.VPS_IMAGE }}"
+            if [ -z "$USER_BOT_IMAGE_VALUE" ]; then
+              USER_BOT_IMAGE_VALUE="${{ secrets.PROD_IMAGE }}"
             fi
-            if [ -n "$VPS_IMAGE_VALUE" ]; then
-              export IMAGE="$VPS_IMAGE_VALUE"
+            if [ -n "$USER_BOT_IMAGE_VALUE" ]; then
+              export USER_BOT_IMAGE="$USER_BOT_IMAGE_VALUE"
             fi
-            chmod +x deploy.sh
-            ./deploy.sh
+
+            bash -euo pipefail -c '
+              cd "$APP_PATH"
+              git fetch --prune origin production
+              git checkout -B production origin/production
+              chmod +x deploy.sh
+              ./deploy.sh
+            '
