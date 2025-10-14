@@ -53,9 +53,17 @@ def build_dispatcher(
     bot = Bot(token=token, default=DefaultBotProperties(parse_mode=ParseMode.HTML))
     dispatcher = Dispatcher()
 
+    def _is_admin_chat_id(chat_id: Optional[int]) -> bool:
+        try:
+            return int(chat_id) == int(admin_chat_id)
+        except (TypeError, ValueError):
+            return False
+
     admin_router = Router(name=f"admin-router-{bot_id or 'default'}")
-    admin_router.message.filter(F.chat.id == admin_chat_id)
-    admin_router.callback_query.filter(F.message.chat.id == admin_chat_id)
+    admin_router.message.filter(lambda message: _is_admin_chat_id(message.chat.id))
+    admin_router.callback_query.filter(
+        lambda callback: callback.message is not None and _is_admin_chat_id(callback.message.chat.id)
+    )
 
     async def _send_menu(
         target: Message | CallbackQuery,
@@ -363,11 +371,15 @@ def build_dispatcher(
     dispatcher.include_router(admin_router)
 
     fallback_router = Router(name="fallback-router")
-    fallback_router.message.filter(F.chat.id != admin_chat_id)
+    fallback_router.message.filter(lambda message: not _is_admin_chat_id(message.chat.id))
 
     @fallback_router.message()
     async def reject_non_admin(message: Message) -> None:
-        await message.answer("Ten bot jest przeznaczony wyłącznie do czatu administracyjnego.")
+        await message.answer(
+            "Ten bot jest przeznaczony wyłącznie do czatu administracyjnego.\n"
+            f"Otrzymano wiadomość z czatu <code>{message.chat.id}</code>, "
+            f"ale oczekiwany jest <code>{admin_chat_id}</code>."
+        )
 
     dispatcher.include_router(fallback_router)
 
