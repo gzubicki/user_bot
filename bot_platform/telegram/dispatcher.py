@@ -7,6 +7,7 @@ from typing import Iterable, Optional
 from aiogram import Bot, Dispatcher, F, Router
 from aiogram.client.default import DefaultBotProperties
 from aiogram.enums import ParseMode
+from aiogram.exceptions import TelegramBadRequest, TelegramNetworkError, TelegramUnauthorizedError
 from aiogram.filters import Command, CommandStart
 from aiogram.fsm.context import FSMContext
 from aiogram.types import CallbackQuery, Message
@@ -59,6 +60,30 @@ def build_dispatcher(
             return int(chat_id) == int(admin_chat_id)
         except (TypeError, ValueError):
             return False
+
+    async def _configure_webhook_for_token(bot_token: Optional[str]) -> tuple[Optional[bool], Optional[str]]:
+        if not bot_token:
+            return None, "Token bota jest pusty – pominięto konfigurację webhooka."
+
+        settings = get_settings()
+        base_url = getattr(settings, "webhook_base_url", None)
+        if not base_url:
+            return False, "Ustaw zmienną WEBHOOK_BASE_URL, aby automatycznie konfigurować webhooki."
+
+        webhook_url = f"{base_url}/telegram/{bot_token}"
+        webhook_bot = Bot(token=bot_token)
+        try:
+            await webhook_bot.set_webhook(
+                webhook_url,
+                secret_token=settings.webhook_secret,
+                drop_pending_updates=False,
+            )
+        except (TelegramUnauthorizedError, TelegramBadRequest, TelegramNetworkError) as exc:
+            return False, f"Nie udało się ustawić webhooka: {exc}"
+        finally:
+            await webhook_bot.session.close()
+
+        return True, webhook_url
 
     admin_router = Router(name=f"admin-router-{bot_id or 'default'}")
     admin_router.message.filter(lambda message: _is_admin_chat_id(message.chat.id))
@@ -608,17 +633,26 @@ def build_dispatcher(
                 return
 
         await bots_service.refresh_bot_token_cache()
+
+        webhook_success, webhook_message = await _configure_webhook_for_token(bot_record.api_token)
         await state.clear()
 
         status = "✅ Dodano nowego bota" if created else "♻️ Zaktualizowano istniejącego bota"
-        summary = (
-            f"{status}:\n"
-            f"• Nazwa: <b>{display_name}</b>\n"
-            f"• Persona: <i>{persona_name}</i>\n"
-            f"• ID w bazie: <code>{bot_record.id}</code>\n\n"
-            "Pamiętaj, aby ustawić webhook w Telegramie oraz, w razie potrzeby, "
-            "wywołać /internal/reload-config."
-        )
+        summary_lines = [
+            f"{status}:",
+            f"• Nazwa: <b>{display_name}</b>",
+            f"• Persona: <i>{persona_name}</i>",
+            f"• ID w bazie: <code>{bot_record.id}</code>",
+        ]
+
+        if webhook_success is True and webhook_message:
+            summary_lines.append(f"• Webhook ustawiony: <code>{webhook_message}</code>")
+        elif webhook_success is False and webhook_message:
+            summary_lines.append(f"⚠️ {webhook_message} – ustaw webhook ręcznie, jeśli to konieczne.")
+        elif webhook_message:
+            summary_lines.append(f"⚠️ {webhook_message}")
+
+        summary = "\n".join(summary_lines)
 
         if isinstance(target, CallbackQuery):
             await target.answer()
@@ -698,20 +732,11 @@ def build_dispatcher(
                 return
 
         await bots_service.refresh_bot_token_cache()
+        webhook_success, webhook_message = await _configure_webhook_for_token(updated_bot.api_token)
         await state.clear()
 
         new_token_effective = updated_bot.api_token
-        if old_token and old_token != new_token_effective:
-            _dispatchers.pop(old_token, None)
-
-        if new_token_effective:
-            bundle = _dispatchers.get(new_token_effective)
-            if bundle is not None:
-                bundle.display_name = updated_bot.display_name
-        else:
-            # jeśli token został usunięty, nie pozostawiaj starego wpisu
-            if old_token:
-                _dispatchers.pop(old_token, None)
+        token_changed = old_token and new_token_effective and old_token != new_token_effective
 
         summary_lines = [
             "💾 Zaktualizowano bota:",
@@ -719,8 +744,20 @@ def build_dispatcher(
             f"• Persona: <i>{persona_label}</i>",
             f"• ID w bazie: <code>{updated_bot.id}</code>",
         ]
-        if old_token and new_token_effective and old_token != new_token_effective:
-            summary_lines.append("• Token został zaktualizowany – pamiętaj o ustawieniu nowego webhooka.")
+
+        if webhook_success is True and webhook_message:
+            summary_lines.append(f"• Webhook ustawiony: <code>{webhook_message}</code>")
+            if token_changed:
+                summary_lines.append("• Token został zmieniony i webhook przełączono automatycznie.")
+        elif webhook_success is False and webhook_message:
+            summary_lines.append(f"⚠️ {webhook_message}")
+            if token_changed:
+                summary_lines.append("⚠️ Token został zmieniony – skonfiguruj webhook ręcznie.")
+        elif webhook_message:
+            summary_lines.append(f"⚠️ {webhook_message}")
+
+        if old_token and new_token_effective is None:
+            summary_lines.append("⚠️ Token został usunięty – webhook przestał działać.")
 
         summary = "\n".join(summary_lines)
 

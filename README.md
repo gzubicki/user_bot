@@ -74,7 +74,7 @@ Rejestrowanie botów odbywa się wyłącznie z poziomu czatu administracyjnego w
 1. Upewnij się, że bot operatorski platformy został dodany do czatu administracyjnego i wywołaj w nim komendę `/start`. Bot pokaże menu z przyciskami: „Dodaj bota”, „Lista botów” oraz „Odśwież tokeny”.
 2. Z menu bota wybierz akcję „Dodaj bota” i wklej token otrzymany od [@BotFather](https://t.me/BotFather). W razie pomyłki możesz przerwać proces poleceniem `/anuluj`.
 3. Wybierz istniejącą personę z listy lub utwórz nową (bot poprosi o nazwę, opis oraz kod języka – domyślnie `auto`).
-4. Po zatwierdzeniu bot jest zapisywany w bazie danych i natychmiast dostępny. Cache tokenów odświeża się automatycznie, możesz też użyć z menu przycisku „Odśwież tokeny”, aby zrobić to ręcznie.
+4. Po zatwierdzeniu bot jest zapisywany w bazie danych i natychmiast dostępny. Cache tokenów odświeża się automatycznie, a jeśli ustawiono `WEBHOOK_BASE_URL`, aplikacja ustawi webhook w Telegramie za Ciebie.
 5. Aby wrócić do menu w dowolnym momencie, użyj komendy `/menu`.
 
 Lista botów oraz person jest dostępna z poziomu przycisku „Lista botów”. Każda pozycja zawiera nazwę i identyfikator rekordu w bazie, co ułatwia dalszą administrację.
@@ -103,11 +103,12 @@ Manualne modyfikacje w bazie danych (np. poprzez `INSERT`) nie są wspierane i m
    - Upewnij się, że w tabeli `bots` znajdują się wpisy z uzupełnionym polem `api_token` oraz ustawioną flagą `is_active=true` (szczegóły znajdziesz w sekcji [Dodawanie pierwszego bota](#dodawanie-pierwszego-bota)).
    - W `.env` ustaw zmienną `ADMIN_CHAT_ID` na identyfikator jedynego czatu administracyjnego. Wszyscy uczestnicy tego czatu uzyskają uprawnienia moderatorskie.
    - Wystaw publiczny adres HTTPS (np. za pomocą [ngrok](https://ngrok.com/)).
-   - Dla każdego tokena z bazy ustaw webhook na adres:
+   - Ustaw zmienną `WEBHOOK_BASE_URL` na publiczny adres (np. `https://twoj-host`). Dzięki temu aplikacja automatycznie ustawi lub zaktualizuje webhook po dodaniu bota.
+   - Jeśli wolisz ręczną konfigurację, ustaw webhook na adres:
      ```
      https://twoj-host/telegram/<TOKEN_BOTA>?secret=<WEBHOOK_SECRET>
      ```
-   - Sekret (`WEBHOOK_SECRET`) musi zgadzać się z wartością w `.env`.
+     Sekret (`WEBHOOK_SECRET`) musi zgadzać się z wartością w `.env`.
 
 ## Dodawanie pierwszego bota
 
@@ -195,6 +196,7 @@ Po skopiowaniu `.env.example` uzupełnij przede wszystkim poniższe wpisy:
 | Zmienna | Jak zdobyć / rekomendowana wartość |
 | --- | --- |
 | `WEBHOOK_SECRET` | Dowolny losowy, trudny do odgadnięcia ciąg znaków. Można go wygenerować poleceniem `openssl rand -hex 32`. Wartość ta trafia do parametru `secret` podczas konfiguracji webhooków i zabezpiecza endpointy przed nieautoryzowanym użyciem. |
+| `WEBHOOK_BASE_URL` | Publiczny adres HTTPS instancji (np. `https://bot.example.com`). Dzięki niemu aplikacja automatycznie ustawia webhooki po dodaniu lub aktualizacji bota. Pozostaw puste, jeśli chcesz wykonywać tę operację ręcznie. |
 | `ADMIN_CHAT_ID` | Identyfikator jedynego czatu administracyjnego w Telegramie. Dla supergrup Telegram zwraca wartości ujemne (np. `-1001234567890`) – przepisz je dokładnie z botów typu `@RawDataBot`. Wszyscy uczestnicy tego czatu uzyskują uprawnienia moderatorskie, a ich akcje są rejestrowane z użyciem surowego ID czatu. |
 | `DATABASE_URL` | Adres połączenia z bazą PostgreSQL w formacie `postgresql+asyncpg://user:password@host:port/database`. W środowisku Docker Compose domyślny wpis z `.env.example` będzie poprawny. |
 | `MODERATION_CHAT_ID` | Liczbowe ID czatu (lub kanału) Telegram, w którym moderatorzy mają otrzymywać powiadomienia. Najłatwiej je pozyskać wysyłając dowolną wiadomość do bota `@userinfobot` z danego czatu lub korzystając z narzędzi typu [@RawDataBot](https://t.me/RawDataBot). |

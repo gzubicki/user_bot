@@ -48,6 +48,7 @@ class Settings(BaseSettings):
     model_config = SettingsConfigDict(env_file=".env", env_file_encoding="utf-8", extra="ignore")
 
     webhook_secret: str = Field(..., alias="WEBHOOK_SECRET")
+    webhook_base_url: str | None = Field(None, alias="WEBHOOK_BASE_URL")
     database_url: str = Field(..., alias="DATABASE_URL")
     admin_chat_id: int = Field(..., alias="ADMIN_CHAT_ID")
 
@@ -66,6 +67,20 @@ class Settings(BaseSettings):
                 raise ValueError("ADMIN_CHAT_ID nie może być puste")
             return int(value)
         return int(value)
+
+    @field_validator("webhook_base_url", mode="before")
+    @classmethod
+    def normalize_webhook_base_url(cls, value: str | None) -> str | None:
+        if value is None:
+            return None
+        value = str(value).strip()
+        if not value:
+            return None
+        if not value.startswith(("http://", "https://")):
+            raise ValueError("WEBHOOK_BASE_URL musi zaczynać się od http:// lub https://")
+        if value.endswith("/"):
+            value = value.rstrip("/")
+        return value
 
 def _settings_source(env_file: str | Path | None = None) -> Settings:
     return Settings(_env_file=env_file)
