@@ -195,7 +195,7 @@ Po skopiowaniu `.env.example` uzupełnij przede wszystkim poniższe wpisy:
 | Zmienna | Jak zdobyć / rekomendowana wartość |
 | --- | --- |
 | `WEBHOOK_SECRET` | Dowolny losowy, trudny do odgadnięcia ciąg znaków. Można go wygenerować poleceniem `openssl rand -hex 32`. Wartość ta trafia do parametru `secret` podczas konfiguracji webhooków i zabezpiecza endpointy przed nieautoryzowanym użyciem. |
-| `ADMIN_CHAT_ID` | Identyfikator jedynego czatu administracyjnego w Telegramie. Wszyscy uczestnicy tego czatu uzyskują uprawnienia moderatorskie, a ich akcje są rejestrowane z użyciem surowego ID czatu. |
+| `ADMIN_CHAT_ID` | Identyfikator jedynego czatu administracyjnego w Telegramie. Dla supergrup Telegram zwraca wartości ujemne (np. `-1001234567890`) – przepisz je dokładnie z botów typu `@RawDataBot`. Wszyscy uczestnicy tego czatu uzyskują uprawnienia moderatorskie, a ich akcje są rejestrowane z użyciem surowego ID czatu. |
 | `DATABASE_URL` | Adres połączenia z bazą PostgreSQL w formacie `postgresql+asyncpg://user:password@host:port/database`. W środowisku Docker Compose domyślny wpis z `.env.example` będzie poprawny. |
 | `MODERATION_CHAT_ID` | Liczbowe ID czatu (lub kanału) Telegram, w którym moderatorzy mają otrzymywać powiadomienia. Najłatwiej je pozyskać wysyłając dowolną wiadomość do bota `@userinfobot` z danego czatu lub korzystając z narzędzi typu [@RawDataBot](https://t.me/RawDataBot). |
 

@@ -16,7 +16,7 @@ from ..config import get_settings
 from ..database import get_session
 from ..services import bots as bots_service
 from ..services import personas as personas_service
-from .states import AddBotStates
+from .states import AddBotStates, EditBotStates
 
 
 @dataclass(slots=True)
@@ -32,6 +32,7 @@ def _main_menu_keyboard() -> InlineKeyboardBuilder:
     builder = InlineKeyboardBuilder()
     builder.button(text="➕ Dodaj bota", callback_data="menu:add_bot")
     builder.button(text="📋 Lista botów", callback_data="menu:list_bots")
+    builder.button(text="✏️ Edytuj bota", callback_data="menu:edit_bot")
     builder.button(text="🔁 Odśwież tokeny", callback_data="menu:refresh_tokens")
     builder.adjust(1)
     return builder
@@ -140,6 +141,264 @@ def build_dispatcher(
         await callback.answer()
         if callback.message:
             await callback.message.answer(text, reply_markup=_main_menu_keyboard().as_markup())
+
+    @admin_router.callback_query(F.data == "menu:edit_bot")
+    async def handle_edit_bot(callback: CallbackQuery, state: FSMContext) -> None:
+        await state.clear()
+        async with get_session() as session:
+            bots = await bots_service.list_bots(session)
+
+        if not bots:
+            await callback.answer()
+            if callback.message:
+                await callback.message.answer(
+                    "🚫 Brak botów do edycji. Wybierz „Dodaj bota”, aby utworzyć nowy rekord.",
+                    reply_markup=_main_menu_keyboard().as_markup(),
+                )
+            return
+
+        keyboard_builder = InlineKeyboardBuilder()
+        for bot_entry in bots:
+            keyboard_builder.button(
+                text=f"{bot_entry.display_name} (ID: {bot_entry.id})",
+                callback_data=f"edit_bot:{bot_entry.id}",
+            )
+        keyboard_builder.button(text="↩️ Wróć", callback_data="menu:main")
+        keyboard_builder.adjust(1)
+
+        await state.set_state(EditBotStates.choosing_bot)
+        await callback.answer()
+        if callback.message:
+            await callback.message.answer(
+                "Wybierz bota, którego chcesz edytować.",
+                reply_markup=keyboard_builder.as_markup(),
+            )
+
+    @admin_router.callback_query(
+        EditBotStates.choosing_bot, lambda c: c.data is not None and c.data.startswith("edit_bot:")
+    )
+    async def handle_edit_bot_choice(callback: CallbackQuery, state: FSMContext) -> None:
+        bot_id_raw = (callback.data or "").split(":", 1)[1]
+        try:
+            bot_id = int(bot_id_raw)
+        except ValueError:
+            await callback.answer("Niepoprawny identyfikator bota.", show_alert=True)
+            return
+
+        async with get_session() as session:
+            bot_record = await bots_service.get_bot_by_id(session, bot_id)
+
+        if bot_record is None:
+            await callback.answer("Nie znaleziono bota. Odśwież listę i spróbuj ponownie.", show_alert=True)
+            return
+
+        persona_name = bot_record.persona.name if bot_record.persona else "—"
+        await state.update_data(
+            bot_id=bot_record.id,
+            current_token=bot_record.api_token,
+            current_display_name=bot_record.display_name,
+            current_persona_id=bot_record.persona_id,
+            current_persona_name=persona_name,
+        )
+        await state.set_state(EditBotStates.waiting_token)
+        await callback.answer()
+        if callback.message:
+            await callback.message.answer(
+                "Wybrano bota <b>{name}</b> (ID: <code>{id}</code>).\n"
+                "Wyślij nowy token lub '-' aby pozostawić bez zmian.\n"
+                "Możesz przerwać w dowolnym momencie poleceniem /anuluj.".format(
+                    name=bot_record.display_name,
+                    id=bot_record.id,
+                )
+            )
+
+    @admin_router.message(EditBotStates.waiting_token)
+    async def edit_receive_token(message: Message, state: FSMContext) -> None:
+        token_raw = (message.text or "").strip()
+        if not token_raw:
+            await message.answer("Podaj token lub '-' aby pozostawić dotychczasowy.")
+            return
+
+        if token_raw == "-":
+            await state.update_data(new_token=None)
+        else:
+            if not _validate_token(token_raw):
+                await message.answer(
+                    "To nie wygląda na prawidłowy token bota. Spróbuj ponownie albo wyślij '-' aby pominąć zmianę."
+                )
+                return
+            await state.update_data(new_token=token_raw)
+
+        data = await state.get_data()
+        current_display = data.get("current_display_name", "—")
+
+        await state.set_state(EditBotStates.waiting_display_name)
+        await message.answer(
+            f"Obecna nazwa to <b>{current_display}</b>.\nWyślij nową nazwę lub '-' aby pozostawić bez zmian."
+        )
+
+    @admin_router.message(EditBotStates.waiting_display_name)
+    async def edit_receive_display_name(message: Message, state: FSMContext) -> None:
+        display_name_raw = (message.text or "").strip()
+        if not display_name_raw:
+            await message.answer("Nazwa nie może być pusta. Podaj nową nazwę lub '-' aby pozostawić bez zmian.")
+            return
+
+        if display_name_raw == "-":
+            await state.update_data(new_display_name=None)
+        else:
+            await state.update_data(new_display_name=display_name_raw)
+
+        async with get_session() as session:
+            personas = await personas_service.list_personas(session)
+
+        data = await state.get_data()
+        current_persona_id = data.get("current_persona_id")
+        current_persona_name = data.get("current_persona_name", "—")
+
+        if personas:
+            await state.update_data(
+                persona_choices=[
+                    {"id": persona.id, "name": persona.name, "language": persona.language}
+                    for persona in personas
+                ]
+            )
+            keyboard_builder = InlineKeyboardBuilder()
+            for persona in personas:
+                prefix = "⭐ " if persona.id == current_persona_id else ""
+                keyboard_builder.button(
+                    text=f"{prefix}{persona.name} ({persona.language})",
+                    callback_data=f"edit_persona:{persona.id}",
+                )
+            keyboard_builder.button(text="➕ Nowa persona", callback_data="edit_persona:new")
+            keyboard_builder.button(text="🛑 Bez zmian", callback_data="edit_persona:keep")
+            keyboard_builder.button(text="↩️ Wróć", callback_data="menu:main")
+            keyboard_builder.adjust(1)
+
+            await state.set_state(EditBotStates.choosing_persona)
+            await message.answer(
+                f"Obecna persona: <i>{current_persona_name}</i>.\n"
+                "Wybierz personę, dodaj nową lub pozostaw obecną.",
+                reply_markup=keyboard_builder.as_markup(),
+            )
+        else:
+            await state.set_state(EditBotStates.waiting_persona_name)
+            await message.answer(
+                "W bazie nie ma jeszcze żadnych person.\nPodaj nazwę nowej persony."
+            )
+
+    @admin_router.callback_query(EditBotStates.choosing_persona, F.data == "edit_persona:keep")
+    async def handle_edit_persona_keep(callback: CallbackQuery, state: FSMContext) -> None:
+        data = await state.get_data()
+        await _finalize_bot_update(
+            callback,
+            state,
+            persona_id=None,
+            persona_name=data.get("current_persona_name"),
+        )
+
+    @admin_router.callback_query(EditBotStates.choosing_persona, F.data == "edit_persona:new")
+    async def handle_edit_persona_new(callback: CallbackQuery, state: FSMContext) -> None:
+        await state.set_state(EditBotStates.waiting_persona_name)
+        await callback.answer()
+        if callback.message:
+            await callback.message.answer(
+                "Podaj nazwę dla nowej persony. Upewnij się, że nazwa jest unikalna."
+            )
+
+    @admin_router.callback_query(
+        EditBotStates.choosing_persona,
+        lambda c: c.data is not None
+        and c.data.startswith("edit_persona:")
+        and c.data not in {"edit_persona:new", "edit_persona:keep"},
+    )
+    async def handle_edit_persona_choice(callback: CallbackQuery, state: FSMContext) -> None:
+        persona_id_raw = (callback.data or "").split(":", 1)[1]
+        try:
+            persona_id = int(persona_id_raw)
+        except ValueError:
+            await callback.answer("Niepoprawna persona.", show_alert=True)
+            return
+
+        data = await state.get_data()
+        persona_choices = data.get("persona_choices", [])
+        persona_info = next((item for item in persona_choices if item["id"] == persona_id), None)
+        if persona_info is None:
+            await callback.answer("Nie znaleziono persony. Spróbuj ponownie.", show_alert=True)
+            return
+
+        await _finalize_bot_update(
+            callback,
+            state,
+            persona_id=persona_id,
+            persona_name=persona_info["name"],
+        )
+
+    @admin_router.message(EditBotStates.waiting_persona_name)
+    async def edit_receive_persona_name(message: Message, state: FSMContext) -> None:
+        name = (message.text or "").strip()
+        if not name:
+            await message.answer("Nazwa persony nie może być pusta. Spróbuj ponownie.")
+            return
+
+        async with get_session() as session:
+            existing = await personas_service.get_persona_by_name(session, name)
+
+        if existing is not None:
+            await _finalize_bot_update(
+                message,
+                state,
+                persona_id=existing.id,
+                persona_name=existing.name,
+            )
+            return
+
+        await state.update_data(new_persona={"name": name})
+        await state.set_state(EditBotStates.waiting_persona_description)
+        await message.answer(
+            "Dodaj krótki opis persony (opcjonalnie). Jeśli chcesz pominąć, wyślij pojedynczy znak '-'."
+        )
+
+    @admin_router.message(EditBotStates.waiting_persona_description)
+    async def edit_receive_persona_description(message: Message, state: FSMContext) -> None:
+        description_raw = (message.text or "").strip()
+        description = None if description_raw in {"", "-"} else description_raw
+
+        data = await state.get_data()
+        new_persona = data.get("new_persona", {})
+        new_persona["description"] = description
+        await state.update_data(new_persona=new_persona)
+
+        await state.set_state(EditBotStates.waiting_persona_language)
+        await message.answer(
+            "Podaj kod języka (np. pl, en). Pozostaw puste lub wpisz 'auto', aby platforma wykrywała język automatycznie."
+        )
+
+    @admin_router.message(EditBotStates.waiting_persona_language)
+    async def edit_receive_persona_language(message: Message, state: FSMContext) -> None:
+        language_raw = (message.text or "").strip().lower()
+        language = language_raw or "auto"
+
+        data = await state.get_data()
+        new_persona = data.get("new_persona", {})
+        new_persona["language"] = language
+        await state.update_data(new_persona=new_persona)
+
+        async with get_session() as session:
+            persona = await personas_service.create_persona(
+                session,
+                name=new_persona["name"],
+                description=new_persona.get("description"),
+                language=new_persona.get("language", "auto"),
+            )
+            await session.commit()
+
+        await _finalize_bot_update(
+            message,
+            state,
+            persona_id=persona.id,
+            persona_name=persona.name,
+        )
 
     @admin_router.callback_query(F.data == "menu:add_bot")
     async def handle_add_bot(callback: CallbackQuery, state: FSMContext) -> None:
@@ -360,6 +619,110 @@ def build_dispatcher(
             "Pamiętaj, aby ustawić webhook w Telegramie oraz, w razie potrzeby, "
             "wywołać /internal/reload-config."
         )
+
+        if isinstance(target, CallbackQuery):
+            await target.answer()
+            if target.message:
+                await target.message.answer(summary, reply_markup=_main_menu_keyboard().as_markup())
+        else:
+            await target.answer(summary, reply_markup=_main_menu_keyboard().as_markup())
+
+    async def _finalize_bot_update(
+        target: Message | CallbackQuery,
+        state: FSMContext,
+        *,
+        persona_id: Optional[int],
+        persona_name: Optional[str],
+    ) -> None:
+        data = await state.get_data()
+        bot_id = data.get("bot_id")
+        if bot_id is None:
+            await state.clear()
+            message_text = (
+                "Brak wybranego bota. Wywołaj menu główne i spróbuj jeszcze raz."
+            )
+            if isinstance(target, CallbackQuery):
+                await target.answer("Brak wybranego bota.", show_alert=True)
+                if target.message:
+                    await target.message.answer(message_text, reply_markup=_main_menu_keyboard().as_markup())
+            else:
+                await target.answer(message_text, reply_markup=_main_menu_keyboard().as_markup())
+            return
+
+        new_token: Optional[str] = data.get("new_token")
+        new_display_name: Optional[str] = data.get("new_display_name")
+        old_display_name: str = data.get("current_display_name", "—")
+        old_persona_name: str = data.get("current_persona_name", "—")
+        old_token: Optional[str] = data.get("current_token")
+        persona_label = persona_name or old_persona_name
+
+        async with get_session() as session:
+            bot_record = await bots_service.get_bot_by_id(session, bot_id)
+            if bot_record is None:
+                await state.clear()
+                message_text = (
+                    "Nie znaleziono bota w bazie. Możliwe, że został usunięty w międzyczasie."
+                )
+                if isinstance(target, CallbackQuery):
+                    await target.answer("Nie znaleziono bota.", show_alert=True)
+                    if target.message:
+                        await target.message.answer(
+                            message_text, reply_markup=_main_menu_keyboard().as_markup()
+                        )
+                else:
+                    await target.answer(message_text, reply_markup=_main_menu_keyboard().as_markup())
+                return
+
+            try:
+                updated_bot = await bots_service.update_bot(
+                    session,
+                    bot_record,
+                    token=new_token,
+                    display_name=new_display_name,
+                    persona_id=persona_id,
+                )
+                await session.commit()
+            except bots_service.BotTokenInUseError as exc:
+                await session.rollback()
+                warning = (
+                    "❗️ Ten token jest już przypisany do innego bota. "
+                    "Podaj inny token lub wyślij '-' aby pozostawić dotychczasowy."
+                )
+                await state.set_state(EditBotStates.waiting_token)
+                if isinstance(target, CallbackQuery):
+                    await target.answer(str(exc), show_alert=True)
+                    if target.message:
+                        await target.message.answer(warning)
+                else:
+                    await target.answer(warning)
+                return
+
+        await bots_service.refresh_bot_token_cache()
+        await state.clear()
+
+        new_token_effective = updated_bot.api_token
+        if old_token and old_token != new_token_effective:
+            _dispatchers.pop(old_token, None)
+
+        if new_token_effective:
+            bundle = _dispatchers.get(new_token_effective)
+            if bundle is not None:
+                bundle.display_name = updated_bot.display_name
+        else:
+            # jeśli token został usunięty, nie pozostawiaj starego wpisu
+            if old_token:
+                _dispatchers.pop(old_token, None)
+
+        summary_lines = [
+            "💾 Zaktualizowano bota:",
+            f"• Nazwa: <b>{updated_bot.display_name or old_display_name}</b>",
+            f"• Persona: <i>{persona_label}</i>",
+            f"• ID w bazie: <code>{updated_bot.id}</code>",
+        ]
+        if old_token and new_token_effective and old_token != new_token_effective:
+            summary_lines.append("• Token został zaktualizowany – pamiętaj o ustawieniu nowego webhooka.")
+
+        summary = "\n".join(summary_lines)
 
         if isinstance(target, CallbackQuery):
             await target.answer()

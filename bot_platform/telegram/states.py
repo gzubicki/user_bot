@@ -12,3 +12,12 @@ class AddBotStates(StatesGroup):
     waiting_persona_description = State()
     waiting_persona_language = State()
 
+
+class EditBotStates(StatesGroup):
+    choosing_bot = State()
+    waiting_token = State()
+    waiting_display_name = State()
+    choosing_persona = State()
+    waiting_persona_name = State()
+    waiting_persona_description = State()
+    waiting_persona_language = State()
