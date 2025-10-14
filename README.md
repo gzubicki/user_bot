@@ -200,6 +200,7 @@ Po skopiowaniu `.env.example` uzupełnij przede wszystkim poniższe wpisy:
 | `USER_BOT_ADMIN_CHAT_ID` | Identyfikator jedynego czatu administracyjnego w Telegramie. Dla supergrup Telegram zwraca wartości ujemne (np. `-1001234567890`) – przepisz je dokładnie z botów typu `@RawDataBot`. Wszyscy uczestnicy tego czatu uzyskują uprawnienia moderatorskie, a ich akcje są rejestrowane z użyciem surowego ID czatu. |
 | `USER_BOT_DATABASE_URL` | Adres połączenia z bazą PostgreSQL w formacie `postgresql+asyncpg://user:password@host:port/database`. W środowisku Docker Compose domyślny wpis z `.env.example` będzie poprawny. |
 | `USER_BOT_MODERATION_CHAT_ID` | Liczbowe ID czatu (lub kanału) Telegram, w którym moderatorzy mają otrzymywać powiadomienia. Najłatwiej je pozyskać wysyłając dowolną wiadomość do bota `@userinfobot` z danego czatu lub korzystając z narzędzi typu [@RawDataBot](https://t.me/RawDataBot). |
+| `USER_BOT_PULL_IMAGE` | Ustaw wartość `1`, aby podczas `deploy.sh` pobierać obraz `USER_BOT_IMAGE` z rejestru (wymaga również `USER_BOT_GHCR_USER` i `USER_BOT_GHCR_PAT`). Domyślnie `0`, co oznacza korzystanie z lokalnie zbudowanego obrazu. |
 
 Pozostałe wartości (limity, ceny, ustawienia logowania) można zostawić domyślne lub dostosować do potrzeb. Aplikacja wspiera „hot reload” konfiguracji – zmiana `.env` i ponowne przeładowanie zmiennych środowiskowych (np. restart procesu lub odczyt w harmonogramie) aktualizuje limity w locie.
 
@@ -256,10 +257,11 @@ Skrypt sprawdza teraz, czy we wskazanym katalogu dostępny jest plik(a) Docker C
 `docker-compose.yml`, można go nadpisać zmienną `USER_BOT_COMPOSE_FILE`). Przy jego braku zostanie
 zwrócony czytelny komunikat zamiast komunikatu z `docker compose`.
 
-Jeżeli ustawisz zmienną `USER_BOT_IMAGE`, zostanie ona użyta jako źródło obrazu aplikacji – skrypt wykona
-logowanie do GHCR (jeśli podano `USER_BOT_GHCR_USER` i `USER_BOT_GHCR_PAT`), pobierze obraz i uruchomi kontenery
-bez przebudowy lokalnej (`docker compose up --no-build`). Aby wymusić budowanie mimo ustawionego
-obrazu, ustaw `USER_BOT_FORCE_BUILD=1`.
+Jeżeli ustawisz zmienną `USER_BOT_IMAGE`, zostanie ona użyta jako źródło obrazu aplikacji. Domyślnie skrypt
+zakłada lokalne budowanie; aby wymusić pobieranie z rejestru, ustaw `USER_BOT_PULL_IMAGE=1`
+(wraz z `USER_BOT_GHCR_USER` i `USER_BOT_GHCR_PAT`), wtedy zostanie wykonane logowanie do GHCR i `docker compose pull`.
+Jeżeli obraz nie istnieje w rejestrze, skrypt zakończy się błędem. Aby mimo podanego obrazu zawsze
+budować lokalnie, ustaw `USER_BOT_FORCE_BUILD=1`.
 
 Na serwerze możesz także skopiować `deploy/.env.production` do `/opt/user_bot/.env` i ewentualnie zaktualizować wartości dla środowiska produkcyjnego (np. `USER_BOT_DATABASE_URL`, `USER_BOT_WEBHOOK_SECRET`). Skrypt `deploy.sh` automatycznie wczyta ten plik podczas uruchomienia.
 
