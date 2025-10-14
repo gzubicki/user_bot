@@ -227,10 +227,12 @@ Aby go włączyć, ustaw w ustawieniach repozytorium sekrety GitHub Actions:
 
 | Sekret | Opis |
 | --- | --- |
-| `PROD_HOST` | Adres IP lub domena serwera produkcyjnego. |
-| `PROD_USER` | Użytkownik z uprawnieniami do wykonywania poleceń Docker na serwerze. |
-| `PROD_SSH_KEY` | Prywatny klucz SSH (format PEM) przypisany do powyższego użytkownika. |
-| `PROD_APP_PATH` | Ścieżka do katalogu projektu na serwerze (np. `/opt/user_bot`). |
+| `VPS_HOST` | Adres IP lub domena serwera produkcyjnego. |
+| `VPS_USER` | Użytkownik z uprawnieniami do wykonywania poleceń Docker na serwerze. |
+| `VPS_SSH_KEY` | Prywatny klucz SSH (format PEM) przypisany do powyższego użytkownika. |
+| `VPS_APP_PATH` | Ścieżka do katalogu projektu na serwerze (np. `/opt/user_bot`). Jeśli nie ustawisz, domyślnie użyjemy `/opt/user_bot`. |
+| `VPS_IMAGE` | (Opcjonalnie) Pełna nazwa obrazu GHCR, który ma zostać pobrany podczas deployu. Pozostaw puste, by budować na serwerze. |
+| `GHCR_PAT` | (Opcjonalnie) Personal Access Token z uprawnieniem `packages:read` do autoryzacji w GHCR. |
 
 Workflow zakłada, że na serwerze działają `git` oraz `docker compose`, a plik `.env` jest już skonfigurowany.
 W razie potrzeby możesz odpalić deploy ręcznie przez „Run workflow” (akcja `workflow_dispatch`).
