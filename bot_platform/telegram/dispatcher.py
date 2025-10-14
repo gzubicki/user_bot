@@ -18,12 +18,12 @@ from aiogram.utils.keyboard import InlineKeyboardBuilder
 
 from ..config import get_settings
 from ..database import get_session
-from ..models import MediaType, ModerationStatus, Submission
+from ..models import MediaType, ModerationStatus, Quote, Submission
 from ..services import bots as bots_service
-from ..models import MediaType, Quote
+from ..services import identities as identities_service
+from ..services import moderation as moderation_service
 from ..services import personas as personas_service
 from ..services import quotes as quotes_service
-from ..services import moderation as moderation_service
 from .states import AddBotStates, EditBotStates, ModerationStates
 
 
@@ -108,6 +108,39 @@ def build_dispatcher(
                 persona_cache["name"] = persona.name
                 persona_cache["language"] = persona.language
         return persona_cache["name"], persona_cache["language"]
+
+    _IDENTITY_FIELD_LABELS = {
+        "id": "ID",
+        "alias": "alias",
+        "name": "nazwa",
+    }
+
+    def _format_identity_fields(fields: Iterable[str]) -> str:
+        labels = [_IDENTITY_FIELD_LABELS.get(field, field) for field in fields]
+        return ", ".join(label for label in labels if label)
+
+    def _build_identity_snapshot(submission: Submission) -> dict[str, Any]:
+        result = identities_service.evaluate_submission_identity(submission)
+        available = [
+            identities_service.describe_identity(descriptor)
+            for descriptor in result.descriptors
+        ]
+        partial = [
+            {
+                "identity": identities_service.describe_identity(descriptor),
+                "fields": list(fields),
+            }
+            for descriptor, fields in result.partial_matches
+        ]
+        return {
+            "matched": result.matched,
+            "matched_fields": list(result.matched_fields),
+            "matched_identity": identities_service.describe_identity(result.matched_identity)
+            if result.matched_identity
+            else None,
+            "available": available,
+            "partial": partial,
+        }
 
     admin_router = Router(name=f"admin-router-{bot_id or 'default'}")
     admin_router.message.filter(lambda message: _is_admin_chat_id(message.chat.id))
@@ -199,10 +232,13 @@ def build_dispatcher(
             "persona_name": submission.persona.name if submission.persona else None,
             "submitted_by_user_id": submission.submitted_by_user_id,
             "submitted_chat_id": submission.submitted_chat_id,
+            "submitted_by_username": submission.submitted_by_username,
+            "submitted_by_name": submission.submitted_by_name,
             "media_type": submission.media_type.value if isinstance(submission.media_type, MediaType) else str(submission.media_type),
             "text_content": submission.text_content or "",
             "file_id": submission.file_id,
             "created_at": submission.created_at.isoformat(),
+            "identity_check": _build_identity_snapshot(submission),
         }
 
     async def _fetch_pending_snapshots() -> list[dict[str, Any]]:
@@ -246,6 +282,55 @@ def build_dispatcher(
             f"Typ: <code>{media_type_enum.value}</code>",
             f"Zgłoszono: {created_at_text}",
         ]
+
+        username_value = snapshot.get("submitted_by_username")
+        if username_value:
+            username_clean = username_value[1:] if username_value.startswith("@") else username_value
+            if username_clean:
+                lines.append(f"Alias: <code>@{html.escape(username_clean)}</code>")
+
+        display_name_value = snapshot.get("submitted_by_name")
+        if display_name_value:
+            lines.append(f"Nazwa: <i>{html.escape(display_name_value)}</i>")
+
+        identity_info = snapshot.get("identity_check") or {}
+        identity_matched = identity_info.get("matched")
+        matched_fields = identity_info.get("matched_fields") or []
+        if identity_matched:
+            field_text = _format_identity_fields(matched_fields)
+            suffix = f" ({field_text})" if field_text else ""
+            lines.append(f"Tożsamość: ✅ potwierdzono{suffix}.")
+            matched_identity_desc = identity_info.get("matched_identity")
+            if matched_identity_desc:
+                lines.append(f"Źródło dopasowania: <i>{html.escape(matched_identity_desc)}</i>")
+        else:
+            available = identity_info.get("available") or []
+            partial = identity_info.get("partial") or []
+            if not available:
+                lines.append("Tożsamość: ⚠️ brak zdefiniowanych tożsamości dla tej persony.")
+            else:
+                lines.append("Tożsamość: ❌ brak zgodności z zapisanymi tożsamościami.")
+                details_added = False
+                if partial:
+                    lines.append("")
+                    lines.append("Częściowe dopasowania:")
+                    for item in partial:
+                        descriptor_text = item.get("identity")
+                        fields = item.get("fields") or []
+                        field_text = _format_identity_fields(fields)
+                        if descriptor_text and field_text:
+                            lines.append(
+                                f"• {html.escape(descriptor_text)} ({html.escape(field_text)})"
+                            )
+                        elif descriptor_text:
+                            lines.append(f"• {html.escape(descriptor_text)}")
+                    details_added = True
+                if available:
+                    if not details_added:
+                        lines.append("")
+                    lines.append("Zdefiniowane tożsamości:")
+                    for descriptor_text in available:
+                        lines.append(f"• {html.escape(descriptor_text)}")
 
         text_content = snapshot.get("text_content") or ""
         if text_content.strip():
@@ -327,6 +412,20 @@ def build_dispatcher(
                 await callback.answer("To zgłoszenie zostało już przetworzone.", show_alert=True)
                 await state.update_data(moderation_skipped=[])
                 await _show_next_submission(callback, state, reset_skip=True)
+                return
+            identity_result = identities_service.evaluate_submission_identity(submission)
+            if not identity_result.matched:
+                if not identity_result.descriptors:
+                    reason = "Nie można zatwierdzić – brak zdefiniowanych tożsamości dla tej persony."
+                else:
+                    reason = "Nie można zatwierdzić – nadawca nie pasuje do zapisanych tożsamości."
+                    if identity_result.partial_matches:
+                        descriptor, fields = identity_result.partial_matches[0]
+                        descriptor_text = identities_service.describe_identity(descriptor)
+                        field_text = _format_identity_fields(fields)
+                        if descriptor_text and field_text:
+                            reason += f" Najbliższe dopasowanie: {descriptor_text} ({field_text})."
+                await callback.answer(reason, show_alert=True)
                 return
             moderator_user_id = callback.from_user.id if callback.from_user else None
             moderator_chat_id = callback.message.chat.id if callback.message else None
@@ -1231,6 +1330,8 @@ def build_dispatcher(
         text_content: Optional[str] = None
         file_id: Optional[str] = None
         media_type_enum: Optional[MediaType] = None
+        submitted_by_username: Optional[str] = message.from_user.username
+        submitted_by_name: Optional[str] = message.from_user.full_name
 
         if message.text:
             text_content = message.text.strip()
@@ -1269,6 +1370,8 @@ def build_dispatcher(
                 persona_id=current_persona_id,
                 submitted_by_user_id=message.from_user.id,
                 submitted_chat_id=message.chat.id,
+                submitted_by_username=submitted_by_username,
+                submitted_by_name=submitted_by_name,
                 media_type=media_type_enum,
                 text_content=text_content,
                 file_id=file_id,
@@ -1288,6 +1391,12 @@ def build_dispatcher(
                 f"Czat: <code>{message.chat.id}</code>",
                 f"Typ: <code>{media_type_enum.value}</code>",
             ]
+            if submitted_by_username:
+                username_clean = submitted_by_username[1:] if submitted_by_username.startswith("@") else submitted_by_username
+                if username_clean:
+                    summary_lines.append(f"Alias: <code>@{html.escape(username_clean)}</code>")
+            if submitted_by_name:
+                summary_lines.append(f"Nazwa: <i>{html.escape(submitted_by_name)}</i>")
             if preview:
                 summary_lines.append("")
                 summary_lines.append(html.escape(preview[:200]))
