@@ -13,17 +13,17 @@ from aiogram.enums import ParseMode
 from aiogram.exceptions import TelegramBadRequest, TelegramNetworkError, TelegramUnauthorizedError
 from aiogram.filters import Command, CommandStart
 from aiogram.fsm.context import FSMContext
-from aiogram.types import CallbackQuery, Message
+from aiogram.types import CallbackQuery, InlineKeyboardMarkup, Message
 from aiogram.utils.keyboard import InlineKeyboardBuilder
 
 from ..config import get_settings
 from ..database import get_session
-from ..models import MediaType, ModerationStatus, Submission
+from ..models import MediaType, ModerationStatus, Quote, Submission
 from ..services import bots as bots_service
-from ..models import MediaType, Quote
+from ..services import identities as identities_service
+from ..services import moderation as moderation_service
 from ..services import personas as personas_service
 from ..services import quotes as quotes_service
-from ..services import moderation as moderation_service
 from .states import AddBotStates, EditBotStates, ModerationStates
 
 
@@ -108,6 +108,39 @@ def build_dispatcher(
                 persona_cache["name"] = persona.name
                 persona_cache["language"] = persona.language
         return persona_cache["name"], persona_cache["language"]
+
+    _IDENTITY_FIELD_LABELS = {
+        "id": "ID",
+        "alias": "alias",
+        "name": "nazwa",
+    }
+
+    def _format_identity_fields(fields: Iterable[str]) -> str:
+        labels = [_IDENTITY_FIELD_LABELS.get(field, field) for field in fields]
+        return ", ".join(label for label in labels if label)
+
+    def _build_identity_snapshot(submission: Submission) -> dict[str, Any]:
+        result = identities_service.evaluate_submission_identity(submission)
+        available = [
+            identities_service.describe_identity(descriptor)
+            for descriptor in result.descriptors
+        ]
+        partial = [
+            {
+                "identity": identities_service.describe_identity(descriptor),
+                "fields": list(fields),
+            }
+            for descriptor, fields in result.partial_matches
+        ]
+        return {
+            "matched": result.matched,
+            "matched_fields": list(result.matched_fields),
+            "matched_identity": identities_service.describe_identity(result.matched_identity)
+            if result.matched_identity
+            else None,
+            "available": available,
+            "partial": partial,
+        }
 
     admin_router = Router(name=f"admin-router-{bot_id or 'default'}")
     admin_router.message.filter(lambda message: _is_admin_chat_id(message.chat.id))
@@ -199,10 +232,13 @@ def build_dispatcher(
             "persona_name": submission.persona.name if submission.persona else None,
             "submitted_by_user_id": submission.submitted_by_user_id,
             "submitted_chat_id": submission.submitted_chat_id,
+            "submitted_by_username": submission.submitted_by_username,
+            "submitted_by_name": submission.submitted_by_name,
             "media_type": submission.media_type.value if isinstance(submission.media_type, MediaType) else str(submission.media_type),
             "text_content": submission.text_content or "",
             "file_id": submission.file_id,
             "created_at": submission.created_at.isoformat(),
+            "identity_check": _build_identity_snapshot(submission),
         }
 
     async def _fetch_pending_snapshots() -> list[dict[str, Any]]:
@@ -213,13 +249,105 @@ def build_dispatcher(
             )
         return [_snapshot_submission(item) for item in submissions]
 
-    async def _send_submission_preview(message: Message, snapshot: dict[str, Any]) -> None:
+    async def _compose_submission_view(snapshot: dict[str, Any]) -> tuple[str, InlineKeyboardMarkup, MediaType]:
+        try:
+            created_at_dt = datetime.fromisoformat(snapshot["created_at"])
+            created_at_text = created_at_dt.strftime("%Y-%m-%d %H:%M:%S")
+        except (KeyError, ValueError):
+            created_at_text = snapshot.get("created_at", "")
+
+        persona_name = snapshot.get("persona_name") or (await _ensure_persona_details())[0]
+        persona_label_source = (
+            persona_name
+            if persona_name
+            else snapshot.get("persona_id")
+            or current_persona_id
+            or "—"
+        )
+        persona_label = html.escape(str(persona_label_source))
+
         media_type_value = snapshot.get("media_type", MediaType.TEXT.value)
-        file_id = snapshot.get("file_id")
         try:
             media_type_enum = MediaType(media_type_value)
         except ValueError:
             media_type_enum = MediaType.TEXT
+
+        lines = [
+            f"<b>Moderacja – zgłoszenie #{snapshot['id']}</b>",
+            f"Persona: <i>{persona_label}</i>",
+            f"Użytkownik: <code>{snapshot.get('submitted_by_user_id')}</code>",
+            f"Czat: <code>{snapshot.get('submitted_chat_id')}</code>",
+            f"Typ: <code>{media_type_enum.value}</code>",
+            f"Zgłoszono: {created_at_text}",
+        ]
+
+        username_value = snapshot.get("submitted_by_username")
+        if username_value:
+            username_clean = username_value[1:] if username_value.startswith("@") else username_value
+            if username_clean:
+                lines.append(f"Alias: <code>@{html.escape(username_clean)}</code>")
+
+        display_name_value = snapshot.get("submitted_by_name")
+        if display_name_value:
+            lines.append(f"Nazwa: <i>{html.escape(display_name_value)}</i>")
+
+        identity_info = snapshot.get("identity_check") or {}
+        identity_matched = identity_info.get("matched")
+        matched_fields = identity_info.get("matched_fields") or []
+        if identity_matched:
+            field_text = _format_identity_fields(matched_fields)
+            suffix = f" ({field_text})" if field_text else ""
+            lines.append(f"Tożsamość: ✅ potwierdzono{suffix}.")
+            matched_identity_desc = identity_info.get("matched_identity")
+            if matched_identity_desc:
+                lines.append(f"Źródło dopasowania: <i>{html.escape(matched_identity_desc)}</i>")
+        else:
+            available = identity_info.get("available") or []
+            partial = identity_info.get("partial") or []
+            if not available:
+                lines.append("Tożsamość: ⚠️ brak zdefiniowanych tożsamości dla tej persony.")
+            else:
+                lines.append("Tożsamość: ❌ brak zgodności z zapisanymi tożsamościami.")
+                details_added = False
+                if partial:
+                    lines.append("")
+                    lines.append("Częściowe dopasowania:")
+                    for item in partial:
+                        descriptor_text = item.get("identity")
+                        fields = item.get("fields") or []
+                        field_text = _format_identity_fields(fields)
+                        if descriptor_text and field_text:
+                            lines.append(
+                                f"• {html.escape(descriptor_text)} ({html.escape(field_text)})"
+                            )
+                        elif descriptor_text:
+                            lines.append(f"• {html.escape(descriptor_text)}")
+                    details_added = True
+                if available:
+                    if not details_added:
+                        lines.append("")
+                    lines.append("Zdefiniowane tożsamości:")
+                    for descriptor_text in available:
+                        lines.append(f"• {html.escape(descriptor_text)}")
+
+        text_content = snapshot.get("text_content") or ""
+        if text_content.strip():
+            lines.append("")
+            lines.append(f"<blockquote>{html.escape(text_content.strip())}</blockquote>")
+
+        keyboard = InlineKeyboardBuilder()
+        submission_id = snapshot["id"]
+        keyboard.button(text="✅ Dodaj", callback_data=f"moderation:approve:{submission_id}")
+        keyboard.button(text="❌ Odrzuć", callback_data=f"moderation:reject:{submission_id}")
+        keyboard.button(text="⏭ Pomiń", callback_data=f"moderation:skip:{submission_id}")
+        keyboard.button(text="↩️ Menu", callback_data="menu:main")
+        keyboard.adjust(2, 1, 1)
+
+        return "\n".join(lines), keyboard.as_markup(), media_type_enum
+
+    async def _send_submission_preview(message: Message, snapshot: dict[str, Any]) -> None:
+        text, keyboard_markup, media_type_enum = await _compose_submission_view(snapshot)
+        file_id = snapshot.get("file_id")
 
         if file_id:
             caption = f"Zgłoszenie #{snapshot['id']} – podgląd"
@@ -231,36 +359,23 @@ def build_dispatcher(
             except TelegramBadRequest:
                 pass
 
-        try:
-            created_at_dt = datetime.fromisoformat(snapshot["created_at"])
-            created_at_text = created_at_dt.strftime("%Y-%m-%d %H:%M:%S")
-        except (KeyError, ValueError):
-            created_at_text = snapshot.get("created_at", "")
+        await message.answer(text, reply_markup=keyboard_markup)
 
-        persona_name = snapshot.get("persona_name") or (await _ensure_persona_details())[0] or "—"
-        lines = [
-            f"<b>Moderacja – zgłoszenie #{snapshot['id']}</b>",
-            f"Persona: <i>{html.escape(persona_name)}</i>",
-            f"Użytkownik: <code>{snapshot.get('submitted_by_user_id')}</code>",
-            f"Czat: <code>{snapshot.get('submitted_chat_id')}</code>",
-            f"Typ: <code>{media_type_enum.value}</code>",
-            f"Zgłoszono: {created_at_text}",
-        ]
+    async def _notify_submission(message_bot: Bot, chat_id: int, snapshot: dict[str, Any]) -> None:
+        text, keyboard_markup, media_type_enum = await _compose_submission_view(snapshot)
+        file_id = snapshot.get("file_id")
 
-        text_content = snapshot.get("text_content") or ""
-        if text_content.strip():
-            lines.append("")
-            lines.append(f"<blockquote>{html.escape(text_content.strip())}</blockquote>")
+        if file_id:
+            caption = f"Zgłoszenie #{snapshot['id']} – podgląd"
+            try:
+                if media_type_enum == MediaType.IMAGE:
+                    await message_bot.send_photo(chat_id, file_id, caption=caption)
+                elif media_type_enum == MediaType.AUDIO:
+                    await message_bot.send_audio(chat_id, file_id, caption=caption)
+            except TelegramBadRequest:
+                pass
 
-        keyboard = InlineKeyboardBuilder()
-        submission_id = snapshot["id"]
-        keyboard.button(text="✅ Zatwierdź", callback_data=f"moderation:approve:{submission_id}")
-        keyboard.button(text="❌ Odrzuć", callback_data=f"moderation:reject:{submission_id}")
-        keyboard.button(text="⏭ Pomiń", callback_data=f"moderation:skip:{submission_id}")
-        keyboard.button(text="↩️ Menu", callback_data="menu:main")
-        keyboard.adjust(2, 1, 1)
-
-        await message.answer("\n".join(lines), reply_markup=keyboard.as_markup())
+        await message_bot.send_message(chat_id, text, reply_markup=keyboard_markup)
 
     async def _show_next_submission(
         target: Message | CallbackQuery,
@@ -328,6 +443,20 @@ def build_dispatcher(
                 await state.update_data(moderation_skipped=[])
                 await _show_next_submission(callback, state, reset_skip=True)
                 return
+            identity_result = identities_service.evaluate_submission_identity(submission)
+            if not identity_result.matched:
+                if not identity_result.descriptors:
+                    reason = "Nie można zatwierdzić – brak zdefiniowanych tożsamości dla tej persony."
+                else:
+                    reason = "Nie można zatwierdzić – nadawca nie pasuje do zapisanych tożsamości."
+                    if identity_result.partial_matches:
+                        descriptor, fields = identity_result.partial_matches[0]
+                        descriptor_text = identities_service.describe_identity(descriptor)
+                        field_text = _format_identity_fields(fields)
+                        if descriptor_text and field_text:
+                            reason += f" Najbliższe dopasowanie: {descriptor_text} ({field_text})."
+                await callback.answer(reason, show_alert=True)
+                return
             moderator_user_id = callback.from_user.id if callback.from_user else None
             moderator_chat_id = callback.message.chat.id if callback.message else None
             await moderation_service.decide_submission(
@@ -368,13 +497,44 @@ def build_dispatcher(
             await callback.answer("Niepoprawne zgłoszenie.", show_alert=True)
             return
 
-        await state.update_data(moderation_reject_target=submission_id)
-        await state.set_state(ModerationStates.waiting_rejection_reason)
-        await callback.answer()
-        if callback.message:
-            await callback.message.answer(
-                "Podaj powód odrzucenia (lub wyślij '-' aby pominąć)."
+        async with get_session() as session:
+            submission = await moderation_service.get_submission_by_id(session, submission_id)
+            if submission is None or submission.status != ModerationStatus.PENDING:
+                await callback.answer("To zgłoszenie zostało już przetworzone.", show_alert=True)
+                await state.update_data(moderation_skipped=[])
+                await _show_next_submission(callback, state, reset_skip=True)
+                return
+
+            moderator_user_id = callback.from_user.id if callback.from_user else None
+            moderator_chat_id = callback.message.chat.id if callback.message else None
+            await moderation_service.decide_submission(
+                session,
+                submission,
+                moderator_user_id=moderator_user_id,
+                moderator_chat_id=moderator_chat_id,
+                action=ModerationStatus.REJECTED,
+                notes=None,
             )
+            submitted_chat_id = submission.submitted_chat_id
+            await session.commit()
+
+        await callback.answer("Zgłoszenie odrzucone.", show_alert=False)
+
+        if (
+            submitted_chat_id
+            and callback.message is not None
+            and submitted_chat_id != callback.message.chat.id
+        ):
+            try:
+                await callback.message.bot.send_message(
+                    submitted_chat_id,
+                    "❌ Twoja propozycja została odrzucona.",
+                )
+            except TelegramBadRequest:
+                pass
+
+        await state.update_data(moderation_skipped=[])
+        await _show_next_submission(callback, state, reset_skip=True)
 
     @admin_router.callback_query(lambda c: c.data is not None and c.data.startswith("moderation:skip:"))
     async def handle_moderation_skip(callback: CallbackQuery, state: FSMContext) -> None:
@@ -391,57 +551,6 @@ def build_dispatcher(
         await state.update_data(moderation_skipped=list(skipped))
         await callback.answer("Pominięto.")
         await _show_next_submission(callback, state)
-
-    @admin_router.message(ModerationStates.waiting_rejection_reason)
-    async def handle_moderation_rejection_reason(message: Message, state: FSMContext) -> None:
-        data = await state.get_data()
-        submission_id = data.get("moderation_reject_target")
-        if submission_id is None:
-            await message.answer("Nie znaleziono zgłoszenia. Wróć do menu.")
-            await state.set_state(ModerationStates.reviewing)
-            await _show_next_submission(message, state, reset_skip=True)
-            return
-
-        reason_text = (message.text or "").strip()
-        if reason_text == "-":
-            reason_text = None
-
-        async with get_session() as session:
-            submission = await moderation_service.get_submission_by_id(session, int(submission_id))
-            if submission is None or submission.status != ModerationStatus.PENDING:
-                await message.answer("To zgłoszenie zostało już przetworzone.")
-                await state.set_state(ModerationStates.reviewing)
-                await state.update_data(moderation_reject_target=None, moderation_skipped=[])
-                await _show_next_submission(message, state, reset_skip=True)
-                return
-
-            moderator_user_id = message.from_user.id if message.from_user else None
-            moderator_chat_id = message.chat.id
-            await moderation_service.decide_submission(
-                session,
-                submission,
-                moderator_user_id=moderator_user_id,
-                moderator_chat_id=moderator_chat_id,
-                action=ModerationStatus.REJECTED,
-                notes=reason_text,
-            )
-            submitted_chat_id = submission.submitted_chat_id
-            await session.commit()
-
-        note_suffix = f" Powód: {reason_text}" if reason_text else ""
-        if submitted_chat_id and submitted_chat_id != message.chat.id:
-            try:
-                await message.bot.send_message(
-                    submitted_chat_id,
-                    f"❌ Twoja propozycja została odrzucona.{note_suffix}",
-                )
-            except TelegramBadRequest:
-                pass
-
-        await message.answer("Zgłoszenie odrzucone.")
-        await state.set_state(ModerationStates.reviewing)
-        await state.update_data(moderation_reject_target=None, moderation_skipped=[])
-        await _show_next_submission(message, state, reset_skip=True)
 
     @admin_router.callback_query(F.data == "menu:edit_bot")
     async def handle_edit_bot(callback: CallbackQuery, state: FSMContext) -> None:
@@ -1231,6 +1340,8 @@ def build_dispatcher(
         text_content: Optional[str] = None
         file_id: Optional[str] = None
         media_type_enum: Optional[MediaType] = None
+        submitted_by_username: Optional[str] = message.from_user.username
+        submitted_by_name: Optional[str] = message.from_user.full_name
 
         if message.text:
             text_content = message.text.strip()
@@ -1269,6 +1380,8 @@ def build_dispatcher(
                 persona_id=current_persona_id,
                 submitted_by_user_id=message.from_user.id,
                 submitted_chat_id=message.chat.id,
+                submitted_by_username=submitted_by_username,
+                submitted_by_name=submitted_by_name,
                 media_type=media_type_enum,
                 text_content=text_content,
                 file_id=file_id,
@@ -1288,18 +1401,20 @@ def build_dispatcher(
                 f"Czat: <code>{message.chat.id}</code>",
                 f"Typ: <code>{media_type_enum.value}</code>",
             ]
+            if submitted_by_username:
+                username_clean = submitted_by_username[1:] if submitted_by_username.startswith("@") else submitted_by_username
+                if username_clean:
+                    summary_lines.append(f"Alias: <code>@{html.escape(username_clean)}</code>")
+            if submitted_by_name:
+                summary_lines.append(f"Nazwa: <i>{html.escape(submitted_by_name)}</i>")
             if preview:
                 summary_lines.append("")
                 summary_lines.append(html.escape(preview[:200]))
+            snapshot = _snapshot_submission(submission)
+            if persona_name:
+                snapshot["persona_name"] = persona_name
             try:
-                keyboard_builder = InlineKeyboardBuilder()
-                keyboard_builder.button(text="🗳 Moderuj", callback_data="menu:moderation")
-                keyboard_builder.adjust(1)
-                await message.bot.send_message(
-                    admin_chat_id,
-                    "\n".join(summary_lines),
-                    reply_markup=keyboard_builder.as_markup(),
-                )
+                await _notify_submission(message.bot, admin_chat_id, snapshot)
             except TelegramBadRequest:
                 pass
 
