@@ -25,4 +25,3 @@ class EditBotStates(StatesGroup):
 
 class ModerationStates(StatesGroup):
     reviewing = State()
-    waiting_rejection_reason = State()
