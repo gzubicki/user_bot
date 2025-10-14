@@ -1337,6 +1337,9 @@ def build_dispatcher(
             await message.answer("Nie udało się rozpoznać nadawcy wiadomości.")
             return
 
+        if message.from_user.is_bot:
+            return
+
         text_content: Optional[str] = None
         file_id: Optional[str] = None
         media_type_enum: Optional[MediaType] = None
