@@ -2,8 +2,10 @@
 from __future__ import annotations
 
 import re
+import html
+from datetime import datetime
 from dataclasses import dataclass
-from typing import Iterable, Optional
+from typing import Any, Iterable, Optional
 
 from aiogram import Bot, Dispatcher, F, Router
 from aiogram.client.default import DefaultBotProperties
@@ -16,11 +18,13 @@ from aiogram.utils.keyboard import InlineKeyboardBuilder
 
 from ..config import get_settings
 from ..database import get_session
+from ..models import MediaType, ModerationStatus, Submission
 from ..services import bots as bots_service
 from ..models import MediaType, Quote
 from ..services import personas as personas_service
 from ..services import quotes as quotes_service
-from .states import AddBotStates, EditBotStates
+from ..services import moderation as moderation_service
+from .states import AddBotStates, EditBotStates, ModerationStates
 
 
 @dataclass(slots=True)
@@ -28,6 +32,7 @@ class DispatcherBundle:
     dispatcher: Dispatcher
     bot: Bot
     moderator_chat_id: int
+    persona_id: Optional[int]
     bot_id: Optional[int] = None
     display_name: Optional[str] = None
 
@@ -37,6 +42,7 @@ def _main_menu_keyboard() -> InlineKeyboardBuilder:
     builder.button(text="➕ Dodaj bota", callback_data="menu:add_bot")
     builder.button(text="📋 Lista botów", callback_data="menu:list_bots")
     builder.button(text="✏️ Edytuj bota", callback_data="menu:edit_bot")
+    builder.button(text="🗳 Moderacja", callback_data="menu:moderation")
     builder.button(text="🔁 Odśwież tokeny", callback_data="menu:refresh_tokens")
     builder.adjust(1)
     return builder
@@ -47,6 +53,7 @@ def build_dispatcher(
     *,
     bot_id: Optional[int] = None,
     display_name: Optional[str] = None,
+    persona_id: Optional[int] = None,
 ) -> DispatcherBundle:
     """Create a dispatcher bundle for a specific bot token."""
 
@@ -87,6 +94,20 @@ def build_dispatcher(
             await webhook_bot.session.close()
 
         return True, webhook_url
+
+    current_persona_id = persona_id
+    persona_cache: dict[str, Optional[str]] = {"name": None, "language": None}
+
+    async def _ensure_persona_details() -> tuple[Optional[str], Optional[str]]:
+        if current_persona_id is None:
+            return None, None
+        if persona_cache["name"] is None:
+            async with get_session() as session:
+                persona = await personas_service.get_persona_by_id(session, current_persona_id)
+            if persona is not None:
+                persona_cache["name"] = persona.name
+                persona_cache["language"] = persona.language
+        return persona_cache["name"], persona_cache["language"]
 
     admin_router = Router(name=f"admin-router-{bot_id or 'default'}")
     admin_router.message.filter(lambda message: _is_admin_chat_id(message.chat.id))
@@ -170,6 +191,257 @@ def build_dispatcher(
         await callback.answer()
         if callback.message:
             await callback.message.answer(text, reply_markup=_main_menu_keyboard().as_markup())
+
+    def _snapshot_submission(submission: Submission) -> dict[str, Any]:
+        return {
+            "id": submission.id,
+            "persona_id": submission.persona_id,
+            "persona_name": submission.persona.name if submission.persona else None,
+            "submitted_by_user_id": submission.submitted_by_user_id,
+            "submitted_chat_id": submission.submitted_chat_id,
+            "media_type": submission.media_type.value if isinstance(submission.media_type, MediaType) else str(submission.media_type),
+            "text_content": submission.text_content or "",
+            "file_id": submission.file_id,
+            "created_at": submission.created_at.isoformat(),
+        }
+
+    async def _fetch_pending_snapshots() -> list[dict[str, Any]]:
+        persona_filter = current_persona_id if current_persona_id is not None else None
+        async with get_session() as session:
+            submissions = await moderation_service.list_pending_submissions(
+                session, persona_id=persona_filter
+            )
+        return [_snapshot_submission(item) for item in submissions]
+
+    async def _send_submission_preview(message: Message, snapshot: dict[str, Any]) -> None:
+        media_type_value = snapshot.get("media_type", MediaType.TEXT.value)
+        file_id = snapshot.get("file_id")
+        try:
+            media_type_enum = MediaType(media_type_value)
+        except ValueError:
+            media_type_enum = MediaType.TEXT
+
+        if file_id:
+            caption = f"Zgłoszenie #{snapshot['id']} – podgląd"
+            try:
+                if media_type_enum == MediaType.IMAGE:
+                    await message.answer_photo(file_id, caption=caption)
+                elif media_type_enum == MediaType.AUDIO:
+                    await message.answer_audio(file_id, caption=caption)
+            except TelegramBadRequest:
+                pass
+
+        try:
+            created_at_dt = datetime.fromisoformat(snapshot["created_at"])
+            created_at_text = created_at_dt.strftime("%Y-%m-%d %H:%M:%S")
+        except (KeyError, ValueError):
+            created_at_text = snapshot.get("created_at", "")
+
+        persona_name = snapshot.get("persona_name") or (await _ensure_persona_details())[0] or "—"
+        lines = [
+            f"<b>Moderacja – zgłoszenie #{snapshot['id']}</b>",
+            f"Persona: <i>{html.escape(persona_name)}</i>",
+            f"Użytkownik: <code>{snapshot.get('submitted_by_user_id')}</code>",
+            f"Czat: <code>{snapshot.get('submitted_chat_id')}</code>",
+            f"Typ: <code>{media_type_enum.value}</code>",
+            f"Zgłoszono: {created_at_text}",
+        ]
+
+        text_content = snapshot.get("text_content") or ""
+        if text_content.strip():
+            lines.append("")
+            lines.append(f"<blockquote>{html.escape(text_content.strip())}</blockquote>")
+
+        keyboard = InlineKeyboardBuilder()
+        submission_id = snapshot["id"]
+        keyboard.button(text="✅ Zatwierdź", callback_data=f"moderation:approve:{submission_id}")
+        keyboard.button(text="❌ Odrzuć", callback_data=f"moderation:reject:{submission_id}")
+        keyboard.button(text="⏭ Pomiń", callback_data=f"moderation:skip:{submission_id}")
+        keyboard.button(text="↩️ Menu", callback_data="menu:main")
+        keyboard.adjust(2, 1, 1)
+
+        await message.answer("\n".join(lines), reply_markup=keyboard.as_markup())
+
+    async def _show_next_submission(
+        target: Message | CallbackQuery,
+        state: FSMContext,
+        *,
+        reset_skip: bool = False,
+    ) -> None:
+        message_obj: Optional[Message]
+        if isinstance(target, CallbackQuery):
+            await target.answer()
+            message_obj = target.message
+        else:
+            message_obj = target
+
+        if message_obj is None:
+            return
+
+        data = await state.get_data()
+        skipped_ids = set()
+        if not reset_skip:
+            skipped_ids = set(int(x) for x in data.get("moderation_skipped", []))
+
+        snapshots = await _fetch_pending_snapshots()
+        for snapshot in snapshots:
+            if snapshot["id"] in skipped_ids:
+                continue
+            skipped_ids.discard(snapshot["id"])
+            await state.update_data(
+                moderation_current_submission=snapshot["id"],
+                moderation_current_snapshot=snapshot,
+                moderation_skipped=list(skipped_ids),
+            )
+            await _send_submission_preview(message_obj, snapshot)
+            return
+
+        await state.update_data(
+            moderation_current_submission=None,
+            moderation_current_snapshot=None,
+            moderation_skipped=[],
+        )
+        await message_obj.answer(
+            "Brak oczekujących zgłoszeń.",
+            reply_markup=_main_menu_keyboard().as_markup(),
+        )
+
+    @admin_router.callback_query(F.data == "menu:moderation")
+    async def handle_moderation_menu(callback: CallbackQuery, state: FSMContext) -> None:
+        await state.set_state(ModerationStates.reviewing)
+        await state.update_data(moderation_skipped=[])
+        await _show_next_submission(callback, state, reset_skip=True)
+
+    @admin_router.callback_query(lambda c: c.data is not None and c.data.startswith("moderation:approve:"))
+    async def handle_moderation_approve(callback: CallbackQuery, state: FSMContext) -> None:
+        submission_id_raw = (callback.data or "").rsplit(":", 1)[-1]
+        try:
+            submission_id = int(submission_id_raw)
+        except ValueError:
+            await callback.answer("Niepoprawne zgłoszenie.", show_alert=True)
+            return
+
+        async with get_session() as session:
+            submission = await moderation_service.get_submission_by_id(session, submission_id)
+            if submission is None or submission.status != ModerationStatus.PENDING:
+                await callback.answer("To zgłoszenie zostało już przetworzone.", show_alert=True)
+                await state.update_data(moderation_skipped=[])
+                await _show_next_submission(callback, state, reset_skip=True)
+                return
+            moderator_user_id = callback.from_user.id if callback.from_user else None
+            moderator_chat_id = callback.message.chat.id if callback.message else None
+            await moderation_service.decide_submission(
+                session,
+                submission,
+                moderator_user_id=moderator_user_id,
+                moderator_chat_id=moderator_chat_id,
+                action=ModerationStatus.APPROVED,
+            )
+            await quotes_service.create_quote_from_submission(session, submission)
+            submitted_chat_id = submission.submitted_chat_id
+            await session.commit()
+
+        await callback.answer("Zgłoszenie zatwierdzone.", show_alert=False)
+
+        if (
+            submitted_chat_id
+            and callback.message is not None
+            and submitted_chat_id != callback.message.chat.id
+        ):
+            try:
+                await callback.message.bot.send_message(
+                    submitted_chat_id,
+                    "✅ Dziękujemy! Twój cytat został zaakceptowany.",
+                )
+            except TelegramBadRequest:
+                pass
+
+        await state.update_data(moderation_skipped=[])
+        await _show_next_submission(callback, state, reset_skip=True)
+
+    @admin_router.callback_query(lambda c: c.data is not None and c.data.startswith("moderation:reject:"))
+    async def handle_moderation_reject(callback: CallbackQuery, state: FSMContext) -> None:
+        submission_id_raw = (callback.data or "").rsplit(":", 1)[-1]
+        try:
+            submission_id = int(submission_id_raw)
+        except ValueError:
+            await callback.answer("Niepoprawne zgłoszenie.", show_alert=True)
+            return
+
+        await state.update_data(moderation_reject_target=submission_id)
+        await state.set_state(ModerationStates.waiting_rejection_reason)
+        await callback.answer()
+        if callback.message:
+            await callback.message.answer(
+                "Podaj powód odrzucenia (lub wyślij '-' aby pominąć)."
+            )
+
+    @admin_router.callback_query(lambda c: c.data is not None and c.data.startswith("moderation:skip:"))
+    async def handle_moderation_skip(callback: CallbackQuery, state: FSMContext) -> None:
+        submission_id_raw = (callback.data or "").rsplit(":", 1)[-1]
+        try:
+            submission_id = int(submission_id_raw)
+        except ValueError:
+            await callback.answer("Niepoprawne zgłoszenie.", show_alert=True)
+            return
+
+        data = await state.get_data()
+        skipped = set(int(x) for x in data.get("moderation_skipped", []))
+        skipped.add(submission_id)
+        await state.update_data(moderation_skipped=list(skipped))
+        await callback.answer("Pominięto.")
+        await _show_next_submission(callback, state)
+
+    @admin_router.message(ModerationStates.waiting_rejection_reason)
+    async def handle_moderation_rejection_reason(message: Message, state: FSMContext) -> None:
+        data = await state.get_data()
+        submission_id = data.get("moderation_reject_target")
+        if submission_id is None:
+            await message.answer("Nie znaleziono zgłoszenia. Wróć do menu.")
+            await state.set_state(ModerationStates.reviewing)
+            await _show_next_submission(message, state, reset_skip=True)
+            return
+
+        reason_text = (message.text or "").strip()
+        if reason_text == "-":
+            reason_text = None
+
+        async with get_session() as session:
+            submission = await moderation_service.get_submission_by_id(session, int(submission_id))
+            if submission is None or submission.status != ModerationStatus.PENDING:
+                await message.answer("To zgłoszenie zostało już przetworzone.")
+                await state.set_state(ModerationStates.reviewing)
+                await state.update_data(moderation_reject_target=None, moderation_skipped=[])
+                await _show_next_submission(message, state, reset_skip=True)
+                return
+
+            moderator_user_id = message.from_user.id if message.from_user else None
+            moderator_chat_id = message.chat.id
+            await moderation_service.decide_submission(
+                session,
+                submission,
+                moderator_user_id=moderator_user_id,
+                moderator_chat_id=moderator_chat_id,
+                action=ModerationStatus.REJECTED,
+                notes=reason_text,
+            )
+            submitted_chat_id = submission.submitted_chat_id
+            await session.commit()
+
+        note_suffix = f" Powód: {reason_text}" if reason_text else ""
+        if submitted_chat_id and submitted_chat_id != message.chat.id:
+            try:
+                await message.bot.send_message(
+                    submitted_chat_id,
+                    f"❌ Twoja propozycja została odrzucona.{note_suffix}",
+                )
+            except TelegramBadRequest:
+                pass
+
+        await message.answer("Zgłoszenie odrzucone.")
+        await state.set_state(ModerationStates.reviewing)
+        await state.update_data(moderation_reject_target=None, moderation_skipped=[])
+        await _show_next_submission(message, state, reset_skip=True)
 
     @admin_router.callback_query(F.data == "menu:edit_bot")
     async def handle_edit_bot(callback: CallbackQuery, state: FSMContext) -> None:
@@ -941,13 +1213,105 @@ def build_dispatcher(
 
     dispatcher.include_router(admin_router)
     dispatcher.include_router(public_router)
+    user_router = Router(name=f"user-router-{bot_id or 'default'}")
+    user_router.message.filter(lambda message: not _is_admin_chat_id(message.chat.id))
+
+    @user_router.message()
+    async def handle_user_submission(message: Message) -> None:
+        if current_persona_id is None:
+            await message.answer(
+                "Ten bot nie jest jeszcze gotowy do przyjmowania wiadomości. Spróbuj ponownie później."
+            )
+            return
+
+        if message.from_user is None:
+            await message.answer("Nie udało się rozpoznać nadawcy wiadomości.")
+            return
+
+        text_content: Optional[str] = None
+        file_id: Optional[str] = None
+        media_type_enum: Optional[MediaType] = None
+
+        if message.text:
+            text_content = message.text.strip()
+            if not text_content:
+                await message.answer("Wyślij proszę treść cytatu w wiadomości tekstowej.")
+                return
+            media_type_enum = MediaType.TEXT
+        elif message.photo:
+            media_type_enum = MediaType.IMAGE
+            file_id = message.photo[-1].file_id
+            if message.caption:
+                text_content = message.caption.strip()
+        elif message.voice:
+            media_type_enum = MediaType.AUDIO
+            file_id = message.voice.file_id
+            if message.caption:
+                text_content = message.caption.strip()
+        elif message.audio:
+            media_type_enum = MediaType.AUDIO
+            file_id = message.audio.file_id
+            if message.caption:
+                text_content = message.caption.strip()
+        else:
+            await message.answer(
+                "Obecnie przyjmuję tylko tekst, zdjęcia lub nagrania audio. Wyślij cytat w jednym z tych formatów."
+            )
+            return
+
+        if media_type_enum is None:
+            await message.answer("Nie udało się rozpoznać typu wiadomości.")
+            return
+
+        async with get_session() as session:
+            submission = await moderation_service.create_submission(
+                session,
+                persona_id=current_persona_id,
+                submitted_by_user_id=message.from_user.id,
+                submitted_chat_id=message.chat.id,
+                media_type=media_type_enum,
+                text_content=text_content,
+                file_id=file_id,
+            )
+            await session.commit()
+
+        await message.answer("Dziękujemy! Twoja propozycja trafiła do kolejki moderacji.")
+
+        if admin_chat_id and message.chat.id != admin_chat_id:
+            persona_name, _ = await _ensure_persona_details()
+            preview = text_content or ("[obraz]" if media_type_enum == MediaType.IMAGE else "[audio]")
+            summary_lines = [
+                "📥 <b>Nowe zgłoszenie do moderacji</b>",
+                f"ID: <code>{submission.id}</code>",
+                f"Persona: <i>{html.escape(persona_name or str(current_persona_id))}</i>",
+                f"Użytkownik: <code>{message.from_user.id}</code>",
+                f"Czat: <code>{message.chat.id}</code>",
+                f"Typ: <code>{media_type_enum.value}</code>",
+            ]
+            if preview:
+                summary_lines.append("")
+                summary_lines.append(html.escape(preview[:200]))
+            try:
+                keyboard_builder = InlineKeyboardBuilder()
+                keyboard_builder.button(text="🗳 Moderuj", callback_data="menu:moderation")
+                keyboard_builder.adjust(1)
+                await message.bot.send_message(
+                    admin_chat_id,
+                    "\n".join(summary_lines),
+                    reply_markup=keyboard_builder.as_markup(),
+                )
+            except TelegramBadRequest:
+                pass
+
+    dispatcher.include_router(user_router)
 
     return DispatcherBundle(
         dispatcher=dispatcher,
         bot=bot,
+        moderator_chat_id=moderator_chat_id,
+        persona_id=current_persona_id,
         bot_id=bot_id,
         display_name=resolved_display_name,
-        moderator_chat_id=moderator_chat_id,
     )
 
 

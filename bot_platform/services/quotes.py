@@ -1,16 +1,17 @@
-"""Quote retrieval helpers."""
+"""Quote management helpers."""
 from __future__ import annotations
 
 from collections import Counter
 from difflib import SequenceMatcher
 import re
+from datetime import datetime
 from random import choice
 from typing import Iterable, Optional, Sequence
 
 from sqlalchemy import func, select
 from sqlalchemy.ext.asyncio import AsyncSession
 
-from ..models import Persona, Quote
+from ..models import MediaType, Persona, Quote, Submission
 
 _WORD_RE = re.compile(r"[\wÀ-ÖØ-öø-ÿ']+", re.UNICODE)
 _STOP_WORDS = {
@@ -216,6 +217,37 @@ async def select_relevant_quote(
 
     fallback = await random_quote(session, persona)
     return fallback
+async def create_quote_from_submission(
+    session: AsyncSession,
+    submission: Submission,
+    *,
+    override_language: Optional[str] = None,
+) -> Quote:
+    """Create a quote from a moderated submission."""
+
+    language = override_language
+    if language is None and submission.persona is not None:
+        language = submission.persona.language
+    if not language:
+        language = "auto"
+
+    quote = Quote(
+        persona_id=submission.persona_id,
+        media_type=(
+            submission.media_type.value
+            if isinstance(submission.media_type, MediaType)
+            else submission.media_type
+        ),
+        text_content=submission.text_content,
+        file_id=submission.file_id,
+        file_hash=submission.file_hash,
+        language=language,
+        created_at=datetime.utcnow(),
+        source_submission_id=submission.id,
+    )
+    session.add(quote)
+    await session.flush()
+    return quote
 
 
 __all__ = [
@@ -225,4 +257,5 @@ __all__ = [
     "choose_best_quote",
     "search_quotes_by_relevance",
     "select_relevant_quote",
+    "create_quote_from_submission",
 ]

@@ -30,7 +30,10 @@ async def _get_dispatcher(bot: ActiveBotToken) -> DispatcherBundle:
         bundle = _dispatchers.get(bot.token)
         if bundle is None:
             bundle = build_dispatcher(
-                bot.token, bot_id=bot.bot_id, display_name=bot.display_name
+                bot.token,
+                bot_id=bot.bot_id,
+                display_name=bot.display_name,
+                persona_id=bot.persona_id,
             )
             _dispatchers[bot.token] = bundle
         return bundle

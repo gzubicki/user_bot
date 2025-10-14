@@ -35,8 +35,10 @@ def _get_sqlalchemy_url() -> str:
     if not url or url == "${DATABASE_URL}":
         env_url = os.getenv("DATABASE_URL")
         if not env_url:
+            env_url = os.getenv("USER_BOT_DATABASE_URL")
+        if not env_url:
             raise RuntimeError(
-                "Brak konfiguracji bazy danych: ustaw zmienną środowiskową DATABASE_URL."
+                "Brak konfiguracji bazy danych: ustaw zmienną środowiskową DATABASE_URL lub USER_BOT_DATABASE_URL."
             )
         url = env_url
     return url

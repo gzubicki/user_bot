@@ -50,8 +50,9 @@ GHCR_USER_VALUE="${USER_BOT_GHCR_USER:-}"
 GHCR_PAT_VALUE="${USER_BOT_GHCR_PAT:-}"
 IMAGE_VALUE="${USER_BOT_IMAGE:-}"
 FORCE_BUILD_VALUE="${USER_BOT_FORCE_BUILD:-0}"
+PULL_IMAGE_VALUE="${USER_BOT_PULL_IMAGE:-0}"
 
-if [[ -n "$GHCR_USER_VALUE" && -n "$GHCR_PAT_VALUE" && -n "$IMAGE_VALUE" ]]; then
+if [[ "$PULL_IMAGE_VALUE" == "1" && -n "$GHCR_USER_VALUE" && -n "$GHCR_PAT_VALUE" && -n "$IMAGE_VALUE" ]]; then
   if ! docker pull "$IMAGE_VALUE" >/dev/null 2>&1; then
     echo "🔐 Logowanie do ghcr.io…" >&2
     echo "$GHCR_PAT_VALUE" | docker login ghcr.io -u "$GHCR_USER_VALUE" --password-stdin
@@ -59,8 +60,16 @@ if [[ -n "$GHCR_USER_VALUE" && -n "$GHCR_PAT_VALUE" && -n "$IMAGE_VALUE" ]]; the
 fi
 echo "🚀 Deploy: aktualizacja kontenerów" >&2
 
-if [[ -n "$IMAGE_VALUE" ]]; then
-  "${compose_cmd[@]}" pull
+if [[ "$PULL_IMAGE_VALUE" == "1" ]]; then
+  if [[ -z "$IMAGE_VALUE" ]]; then
+    echo "❌ USER_BOT_PULL_IMAGE=1 wymaga ustawienia USER_BOT_IMAGE (np. ghcr.io/namespace/image:tag)." >&2
+    exit 1
+  fi
+  if ! "${compose_cmd[@]}" pull; then
+    echo "❌ Nie udało się pobrać obrazu ${IMAGE_VALUE}." >&2
+    echo "   Upewnij się, że obraz istnieje w rejestrze albo ustaw USER_BOT_PULL_IMAGE=0, aby budować lokalnie." >&2
+    exit 1
+  fi
 else
   "${compose_cmd[@]}" pull --ignore-pull-failures
 fi
