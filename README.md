@@ -250,7 +250,7 @@ Na serwerze możesz uruchomić `./deploy.sh`. Skrypt automatycznie wczytuje zmie
 wykonuje `docker compose pull`, `docker compose up -d --build`, uruchamia migracje Alembic
 (`docker compose run --rm app alembic upgrade head`) oraz sprząta obrazy (`docker image prune -f`).
 Jeżeli repozytorium znajduje się w innym katalogu niż katalog skryptu, ustaw zmienną
-`USER_BOT_REPO_DIR=/ścieżka/do/user_bot` przed uruchomieniem (starsze `REPO_DIR` nadal jest obsługiwane).
+`USER_BOT_REPO_DIR=/ścieżka/do/user_bot` przed uruchomieniem.
 
 Skrypt sprawdza teraz, czy we wskazanym katalogu dostępny jest plik(a) Docker Compose (domyślnie
 `docker-compose.yml`, można go nadpisać zmienną `USER_BOT_COMPOSE_FILE`). Przy jego braku zostanie
