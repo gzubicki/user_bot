@@ -104,7 +104,15 @@ class Submission(Base):
     persona_id: Mapped[int] = mapped_column(ForeignKey("personas.id", ondelete="CASCADE"), nullable=False)
     submitted_by_user_id: Mapped[int] = mapped_column(BigInteger, nullable=False)
     submitted_chat_id: Mapped[int] = mapped_column(BigInteger, nullable=False)
-    media_type: Mapped[MediaType] = mapped_column(Enum(MediaType), nullable=False)
+    media_type: Mapped[MediaType] = mapped_column(
+        Enum(
+            MediaType,
+            name="mediatype",
+            values_callable=lambda enum_cls: [item.value for item in enum_cls],
+            validate_strings=True,
+        ),
+        nullable=False,
+    )
     text_content: Mapped[Optional[str]] = mapped_column(Text)
     file_id: Mapped[Optional[str]] = mapped_column(String(255))
     file_hash: Mapped[Optional[bytes]] = mapped_column(LargeBinary)
@@ -127,7 +135,15 @@ class Quote(Base):
 
     id: Mapped[int] = mapped_column(Integer, primary_key=True, autoincrement=True)
     persona_id: Mapped[int] = mapped_column(ForeignKey("personas.id", ondelete="CASCADE"), nullable=False)
-    media_type: Mapped[MediaType] = mapped_column(Enum(MediaType), nullable=False)
+    media_type: Mapped[MediaType] = mapped_column(
+        Enum(
+            MediaType,
+            name="mediatype",
+            values_callable=lambda enum_cls: [item.value for item in enum_cls],
+            validate_strings=True,
+        ),
+        nullable=False,
+    )
     text_content: Mapped[Optional[str]] = mapped_column(Text)
     file_id: Mapped[Optional[str]] = mapped_column(String(255))
     file_hash: Mapped[Optional[bytes]] = mapped_column(LargeBinary)
