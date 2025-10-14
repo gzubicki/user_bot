@@ -13,6 +13,7 @@ concurrency:
 env:
   PYTHON_VERSION: "3.11"
   DEFAULT_APP_PATH: /opt/user_bot
+  GHCR_IMAGE: ghcr.io/${{ github.repository_owner }}/user_bot:latest
 
 jobs:
   build-and-test:
@@ -45,10 +46,44 @@ jobs:
             fi
           }
 
+  build-image:
+    name: Build & Publish Image
+    runs-on: ubuntu-latest
+    needs: build-and-test
+    permissions:
+      contents: read
+      packages: write
+
+    steps:
+      - name: Checkout repository
+        uses: actions/checkout@v4
+
+      - name: Set up QEMU
+        uses: docker/setup-qemu-action@v3
+
+      - name: Set up Docker Buildx
+        uses: docker/setup-buildx-action@v3
+
+      - name: Log in to GHCR
+        uses: docker/login-action@v3
+        with:
+          registry: ghcr.io
+          username: ${{ github.actor }}
+          password: ${{ secrets.GITHUB_TOKEN }}
+
+      - name: Build and push image
+        uses: docker/build-push-action@v5
+        with:
+          context: .
+          push: true
+          tags: ${{ env.GHCR_IMAGE }}
+
   deploy:
     name: Deploy to Production
     runs-on: ubuntu-latest
-    needs: build-and-test
+    needs:
+      - build-and-test
+      - build-image
     if: github.ref == 'refs/heads/production'
 
     steps:
@@ -80,6 +115,9 @@ jobs:
             USER_BOT_IMAGE_VALUE="${{ secrets.VPS_IMAGE }}"
             if [ -z "$USER_BOT_IMAGE_VALUE" ]; then
               USER_BOT_IMAGE_VALUE="${{ secrets.PROD_IMAGE }}"
+            fi
+            if [ -z "$USER_BOT_IMAGE_VALUE" ] && [ -n "${GHCR_IMAGE:-}" ]; then
+              USER_BOT_IMAGE_VALUE="$GHCR_IMAGE"
             fi
             if [ -n "$USER_BOT_IMAGE_VALUE" ]; then
               export USER_BOT_IMAGE="$USER_BOT_IMAGE_VALUE"

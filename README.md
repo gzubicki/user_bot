@@ -236,6 +236,7 @@ pytest
 Repozytorium zawiera workflow `.github/workflows/deploy.yml`, który po każdym pushu do gałęzi `production`:
 
 - uruchamia testy (`pytest`) na Pythonie 3.11,
+- buduje i publikuje obraz Dockera w GHCR (`ghcr.io/<owner>/user_bot:latest`),
 - po sukcesie loguje się na serwer produkcyjny przez SSH i odświeża kontenery Docker Compose.
 
 Aby go włączyć, ustaw w ustawieniach repozytorium sekrety GitHub Actions:
@@ -246,7 +247,7 @@ Aby go włączyć, ustaw w ustawieniach repozytorium sekrety GitHub Actions:
 | `VPS_USER` | Użytkownik z uprawnieniami do wykonywania poleceń Docker na serwerze. |
 | `VPS_SSH_KEY` | Prywatny klucz SSH (format PEM) przypisany do powyższego użytkownika. |
 | `VPS_APP_PATH` | Ścieżka do katalogu projektu na serwerze (np. `/opt/user_bot`). Jeśli nie ustawisz, domyślnie użyjemy `/opt/user_bot`. |
-| `VPS_IMAGE` | (Opcjonalnie) Pełna nazwa obrazu GHCR, który ma zostać pobrany podczas deployu. Pozostaw puste, by budować na serwerze. |
+| `VPS_IMAGE` | (Opcjonalnie) Pełna nazwa obrazu GHCR, który ma zostać pobrany podczas deployu. Gdy pozostawisz puste, workflow użyje domyślnego `ghcr.io/<owner>/user_bot:latest`. |
 | `GHCR_PAT` | (Opcjonalnie) Personal Access Token z uprawnieniem `packages:read` do autoryzacji w GHCR. |
 
 Workflow zakłada, że na serwerze działają `git` oraz `docker compose`, a plik `.env` jest już skonfigurowany.
