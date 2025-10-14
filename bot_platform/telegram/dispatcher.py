@@ -1153,21 +1153,38 @@ def build_dispatcher(
         else:
             await target.answer(summary, reply_markup=_main_menu_keyboard().as_markup())
 
-    async def _get_bot_identity() -> tuple[int, Optional[str]]:
+    async def _get_bot_identity(bot_instance: Optional[Bot] = None) -> tuple[int, Optional[str]]:
         nonlocal bot
-        if not hasattr(_get_bot_identity, "_cache"):
-            _get_bot_identity._cache = {}
+        if bot_instance is None:
+            bot_instance = bot
 
-        cache = getattr(_get_bot_identity, "_cache")
-        cached = cache.get(bot.token)
+        cache: dict[Any, tuple[int, Optional[str]]]
+        if not hasattr(_get_bot_identity, "_cache"):
+            cache = {}
+            setattr(_get_bot_identity, "_cache", cache)
+        else:
+            cache = getattr(_get_bot_identity, "_cache")
+
+        cache_key: Any
+        token = getattr(bot_instance, "token", None)
+        cache_key = token or id(bot_instance)
+
+        cached = cache.get(cache_key)
         if cached is not None:
             return cached
 
-        profile = await bot.get_me()
+        profile = await bot_instance.get_me()
         username = profile.username.lower() if profile.username else None
         cached_value = (profile.id, username)
-        cache[bot.token] = cached_value
+        cache[cache_key] = cached_value
         return cached_value
+
+    async def _is_message_from_current_bot(message: Message) -> bool:
+        user = message.from_user
+        if user is None or not user.is_bot:
+            return False
+        bot_id, _ = await _get_bot_identity(message.bot)
+        return user.id == bot_id
 
     def _strip_bot_mentions(text: str, username: Optional[str]) -> str:
         if not text:
@@ -1285,7 +1302,7 @@ def build_dispatcher(
 
     @public_router.message(F.text | F.caption)
     async def handle_public_invocation(message: Message) -> None:
-        if message.from_user and message.from_user.is_bot:
+        if await _is_message_from_current_bot(message):
             return
 
         if not await _is_direct_invocation(message):
@@ -1337,7 +1354,7 @@ def build_dispatcher(
             await message.answer("Nie udało się rozpoznać nadawcy wiadomości.")
             return
 
-        if message.from_user.is_bot:
+        if await _is_message_from_current_bot(message):
             return
 
         text_content: Optional[str] = None
