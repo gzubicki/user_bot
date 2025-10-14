@@ -6,6 +6,8 @@ from typing import Dict
 
 from fastapi import Depends, FastAPI, Header, HTTPException, Request, status
 from fastapi.responses import JSONResponse
+from aiogram.types import Update
+from pydantic import ValidationError
 
 from ..config import get_settings, reload_settings
 from ..rate_limiting import RateLimiter
@@ -51,6 +53,13 @@ async def telegram_webhook(
         raise HTTPException(status_code=status.HTTP_404_NOT_FOUND, detail="Unknown bot token")
 
     payload = await request.json()
+    try:
+        update = Update.model_validate(payload)
+    except ValidationError as exc:
+        raise HTTPException(
+            status_code=status.HTTP_400_BAD_REQUEST,
+            detail="Invalid update payload",
+        ) from exc
     bundle = await _get_dispatcher(bot)
 
     chat_id = str(payload.get("message", {}).get("chat", {}).get("id", "global"))
@@ -58,7 +67,7 @@ async def telegram_webhook(
     if not allowed:
         return JSONResponse(status_code=status.HTTP_429_TOO_MANY_REQUESTS, content={"status": "rate_limited"})
 
-    await bundle.dispatcher.feed_update(bot=bundle.bot, update=payload)
+    await bundle.dispatcher.feed_update(bot=bundle.bot, update=update)
     return JSONResponse(content={"status": "ok"})
 
 
