@@ -96,6 +96,7 @@ jobs:
           host: ${{ secrets.VPS_HOST }}
           username: ${{ secrets.VPS_USER }}
           key: ${{ secrets.VPS_SSH_KEY }}
+          envs: GHCR_IMAGE
           script: |
             APP_PATH="${{ secrets.VPS_APP_PATH }}"
             if [ -z "$APP_PATH" ]; then
@@ -110,6 +111,10 @@ jobs:
             if [ -n "$USER_BOT_GHCR_PAT" ]; then
               export USER_BOT_GHCR_PAT
               export USER_BOT_GHCR_USER="${{ github.repository_owner }}"
+            fi
+
+            if [ -z "${GHCR_IMAGE:-}" ]; then
+              GHCR_IMAGE="${{ env.GHCR_IMAGE }}"
             fi
 
             USER_BOT_IMAGE_VALUE="${{ secrets.VPS_IMAGE }}"
