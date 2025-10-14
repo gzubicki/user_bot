@@ -116,7 +116,16 @@ class Submission(Base):
     text_content: Mapped[Optional[str]] = mapped_column(Text)
     file_id: Mapped[Optional[str]] = mapped_column(String(255))
     file_hash: Mapped[Optional[bytes]] = mapped_column(LargeBinary)
-    status: Mapped[ModerationStatus] = mapped_column(Enum(ModerationStatus), default=ModerationStatus.PENDING, nullable=False)
+    status: Mapped[ModerationStatus] = mapped_column(
+        Enum(
+            ModerationStatus,
+            name="moderationstatus",
+            values_callable=lambda enum_cls: [item.value for item in enum_cls],
+            validate_strings=True,
+        ),
+        default=ModerationStatus.PENDING,
+        nullable=False,
+    )
     created_at: Mapped[datetime] = mapped_column(DateTime(timezone=True), default=datetime.utcnow, nullable=False)
     decided_at: Mapped[Optional[datetime]] = mapped_column(DateTime(timezone=True))
     decided_by_user_id: Mapped[Optional[int]] = mapped_column(BigInteger, nullable=True)
@@ -162,7 +171,15 @@ class ModerationAction(Base):
     submission_id: Mapped[int] = mapped_column(ForeignKey("submissions.id", ondelete="CASCADE"), nullable=False)
     performed_by_user_id: Mapped[Optional[int]] = mapped_column(BigInteger, nullable=True)
     admin_chat_id: Mapped[Optional[int]] = mapped_column(BigInteger, nullable=True)
-    action: Mapped[ModerationStatus] = mapped_column(Enum(ModerationStatus), nullable=False)
+    action: Mapped[ModerationStatus] = mapped_column(
+        Enum(
+            ModerationStatus,
+            name="moderationstatus",
+            values_callable=lambda enum_cls: [item.value for item in enum_cls],
+            validate_strings=True,
+        ),
+        nullable=False,
+    )
     created_at: Mapped[datetime] = mapped_column(DateTime(timezone=True), default=datetime.utcnow, nullable=False)
     notes: Mapped[Optional[str]] = mapped_column(Text)
 
@@ -178,7 +195,15 @@ class BotChatSubscription(Base):
     id: Mapped[int] = mapped_column(Integer, primary_key=True, autoincrement=True)
     bot_id: Mapped[int] = mapped_column(ForeignKey("bots.id", ondelete="CASCADE"), nullable=False)
     chat_id: Mapped[int] = mapped_column(BigInteger, nullable=False)
-    plan: Mapped[SubscriptionPlan] = mapped_column(Enum(SubscriptionPlan), nullable=False)
+    plan: Mapped[SubscriptionPlan] = mapped_column(
+        Enum(
+            SubscriptionPlan,
+            name="subscriptionplan",
+            values_callable=lambda enum_cls: [item.value for item in enum_cls],
+            validate_strings=True,
+        ),
+        nullable=False,
+    )
     started_at: Mapped[datetime] = mapped_column(DateTime(timezone=True), default=datetime.utcnow, nullable=False)
     expires_at: Mapped[Optional[datetime]] = mapped_column(DateTime(timezone=True))
     is_active: Mapped[bool] = mapped_column(Boolean, default=True, nullable=False)
@@ -202,7 +227,15 @@ class SubscriptionLedger(Base):
     id: Mapped[int] = mapped_column(Integer, primary_key=True, autoincrement=True)
     bot_id: Mapped[int] = mapped_column(ForeignKey("bots.id", ondelete="CASCADE"), nullable=False)
     chat_id: Mapped[Optional[int]] = mapped_column(BigInteger)
-    plan: Mapped[SubscriptionPlan] = mapped_column(Enum(SubscriptionPlan), nullable=False)
+    plan: Mapped[SubscriptionPlan] = mapped_column(
+        Enum(
+            SubscriptionPlan,
+            name="subscriptionplan",
+            values_callable=lambda enum_cls: [item.value for item in enum_cls],
+            validate_strings=True,
+        ),
+        nullable=False,
+    )
     amount_stars: Mapped[int] = mapped_column(Integer, nullable=False)
     transaction_id: Mapped[Optional[str]] = mapped_column(String(255))
     occurred_at: Mapped[datetime] = mapped_column(DateTime(timezone=True), default=datetime.utcnow, nullable=False)
