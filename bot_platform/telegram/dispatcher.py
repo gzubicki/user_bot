@@ -1122,9 +1122,13 @@ def build_dispatcher(
                 summary_lines.append("")
                 summary_lines.append(html.escape(preview[:200]))
             try:
+                keyboard_builder = InlineKeyboardBuilder()
+                keyboard_builder.button(text="🗳 Moderuj", callback_data="menu:moderation")
+                keyboard_builder.adjust(1)
                 await message.bot.send_message(
                     admin_chat_id,
                     "\n".join(summary_lines),
+                    reply_markup=keyboard_builder.as_markup(),
                 )
             except TelegramBadRequest:
                 pass
