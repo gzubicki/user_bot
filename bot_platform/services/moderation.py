@@ -49,11 +49,11 @@ async def create_submission(
         persona_id=persona_id,
         submitted_by_user_id=submitted_by_user_id,
         submitted_chat_id=submitted_chat_id,
-        media_type=media_type,
+        media_type=media_type.value if isinstance(media_type, MediaType) else media_type,
         text_content=text_content,
         file_id=file_id,
         file_hash=file_hash,
-        status=ModerationStatus.PENDING,
+        status=ModerationStatus.PENDING.value,
     )
     session.add(submission)
     await session.flush()
@@ -73,7 +73,7 @@ async def decide_submission(
     if action not in {ModerationStatus.APPROVED, ModerationStatus.REJECTED}:
         raise ValueError("Moderation action must be APPROVED or REJECTED")
 
-    submission.status = action
+    submission.status = action.value if isinstance(action, ModerationStatus) else action
     submission.decided_at = datetime.utcnow()
     submission.decided_by_user_id = moderator_user_id
     submission.decided_in_chat_id = moderator_chat_id
@@ -83,7 +83,7 @@ async def decide_submission(
         submission_id=submission.id,
         performed_by_user_id=moderator_user_id,
         admin_chat_id=moderator_chat_id,
-        action=action,
+        action=action.value if isinstance(action, ModerationStatus) else action,
         notes=notes,
     )
     session.add(moderation_action)

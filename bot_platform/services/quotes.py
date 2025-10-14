@@ -62,7 +62,11 @@ async def create_quote_from_submission(
 
     quote = Quote(
         persona_id=submission.persona_id,
-        media_type=submission.media_type,
+        media_type=(
+            submission.media_type.value
+            if isinstance(submission.media_type, MediaType)
+            else submission.media_type
+        ),
         text_content=submission.text_content,
         file_id=submission.file_id,
         file_hash=submission.file_hash,

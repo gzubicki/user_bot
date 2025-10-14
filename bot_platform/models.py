@@ -123,7 +123,7 @@ class Submission(Base):
             values_callable=lambda enum_cls: [item.value for item in enum_cls],
             validate_strings=True,
         ),
-        default=ModerationStatus.PENDING,
+        default=ModerationStatus.PENDING.value,
         nullable=False,
     )
     created_at: Mapped[datetime] = mapped_column(DateTime(timezone=True), default=datetime.utcnow, nullable=False)
