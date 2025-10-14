@@ -21,3 +21,8 @@ class EditBotStates(StatesGroup):
     waiting_persona_name = State()
     waiting_persona_description = State()
     waiting_persona_language = State()
+
+
+class ModerationStates(StatesGroup):
+    reviewing = State()
+    waiting_rejection_reason = State()

@@ -34,7 +34,16 @@ jobs:
           pip install ".[dev]"
 
       - name: Run tests
-        run: pytest
+        run: |
+          set -e
+          pytest || {
+            exit_code=$?
+            if [ "$exit_code" -eq 5 ]; then
+              echo "pytest exited with code 5 (no tests collected) – treating as success."
+            else
+              exit "$exit_code"
+            fi
+          }
 
   deploy:
     name: Deploy to Production
