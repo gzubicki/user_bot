@@ -2,7 +2,7 @@
 from __future__ import annotations
 
 from datetime import datetime
-from typing import Optional
+from typing import Optional, Sequence
 
 from sqlalchemy import select
 from sqlalchemy.ext.asyncio import AsyncSession
@@ -71,9 +71,51 @@ async def list_persona_aliases(session: AsyncSession, persona: Persona) -> list[
     return list(result.scalars().all())
 
 
+async def list_personas(session: AsyncSession) -> Sequence[Persona]:
+    result = await session.execute(select(Persona).order_by(Persona.name.asc()))
+    return list(result.scalars().all())
+
+
+async def get_persona_by_id(session: AsyncSession, persona_id: int) -> Optional[Persona]:
+    result = await session.execute(select(Persona).where(Persona.id == persona_id))
+    return result.scalars().first()
+
+
+async def get_persona_by_name(session: AsyncSession, name: str) -> Optional[Persona]:
+    result = await session.execute(select(Persona).where(Persona.name.ilike(name)))
+    return result.scalars().first()
+
+
+async def create_persona(
+    session: AsyncSession,
+    *,
+    name: str,
+    description: Optional[str],
+    language: str,
+) -> Persona:
+    existing = await get_persona_by_name(session, name)
+    if existing is not None:
+        return existing
+
+    persona = Persona(
+        name=name,
+        description=description,
+        language=language,
+        created_at=datetime.utcnow(),
+        is_active=True,
+    )
+    session.add(persona)
+    await session.flush()
+    return persona
+
+
 __all__ = [
     "get_persona_by_alias",
     "add_alias",
     "remove_alias",
     "list_persona_aliases",
+    "list_personas",
+    "get_persona_by_id",
+    "get_persona_by_name",
+    "create_persona",
 ]

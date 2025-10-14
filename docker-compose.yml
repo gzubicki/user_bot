@@ -16,7 +16,7 @@ services:
       start_period: 5s
 
   app:
-    image: "${IMAGE:-user_bot_app}"
+    image: "${USER_BOT_IMAGE:-user_bot_app}"
     build: .
     restart: unless-stopped
     working_dir: /app
@@ -25,7 +25,7 @@ services:
         condition: service_healthy
     env_file: .env
     ports:
-      - "${APP_HOST_PORT:-8000}:8000"
+      - "${USER_BOT_APP_HOST_PORT:-8000}:8000"
 
 volumes:
   postgres_data:
