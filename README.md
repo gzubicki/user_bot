@@ -12,7 +12,7 @@ Platforma stanowi fundament do uruchomienia wielu botów Telegrama, które odgry
 
 ## Czat administracyjny
 
-Platforma opiera się na jednym czacie administracyjnym w Telegramie. Jego identyfikator należy ustawić w zmiennej środowiskowej `ADMIN_CHAT_ID`. Każdy uczestnik tego czatu zyskuje uprawnienia moderatorskie, a wykonane akcje zapisują identyfikatory użytkownika i czatu bezpośrednio w polach dzienników (`*_chat_id`). Takie podejście umożliwia audyt działań bez utrzymywania dodatkowych tabel referencyjnych.
+Platforma opiera się na jednym czacie administracyjnym w Telegramie. Jego identyfikator należy ustawić w zmiennej środowiskowej `USER_BOT_ADMIN_CHAT_ID` (dla zgodności wspierane jest także dawne `ADMIN_CHAT_ID`). Każdy uczestnik tego czatu zyskuje uprawnienia moderatorskie, a wykonane akcje zapisują identyfikatory użytkownika i czatu bezpośrednio w polach dzienników (`*_chat_id`). Takie podejście umożliwia audyt działań bez utrzymywania dodatkowych tabel referencyjnych.
 
 ## Struktura repozytorium
 
@@ -49,12 +49,12 @@ README.md
    ```bash
    cp .env.example .env
    ```
-   Uzupełnij w nim co najmniej `WEBHOOK_SECRET`, `ADMIN_CHAT_ID` (identyfikator jedynego czatu administracyjnego) oraz wartości połączenia z bazą danych, jeśli chcesz skorzystać z zewnętrznego klastra PostgreSQL.
+   Uzupełnij w nim co najmniej `USER_BOT_WEBHOOK_SECRET`, `USER_BOT_ADMIN_CHAT_ID` (identyfikator jedynego czatu administracyjnego) oraz wartości połączenia z bazą danych (`USER_BOT_DATABASE_URL`), jeśli chcesz skorzystać z zewnętrznego klastra PostgreSQL.
 3. **Zbuduj i uruchom stos aplikacji**
    ```bash
    docker compose up --build
    ```
-   Komenda utworzy kontenery aplikacji (`app`) i bazy (`postgres`) oraz wystawi interfejs HTTP na porcie wskazanym w `.env` (`APP_HOST_PORT`, domyślnie `8100`).
+   Komenda utworzy kontenery aplikacji (`app`) i bazy (`postgres`) oraz wystawi interfejs HTTP na porcie wskazanym w `.env` (`USER_BOT_APP_HOST_PORT`, domyślnie `8100`).
 4. **Wykonaj migracje schematu**
    Po starcie usług zainicjalizuj bazę poleceniem:
    ```bash
@@ -63,18 +63,18 @@ README.md
 5. **Skonfiguruj webhooki Telegrama**
    Udostępnij aplikację pod publicznym adresem HTTPS (np. przy pomocy [ngrok](https://ngrok.com/)) i dla każdego zarządzanego bota ustaw webhook:
    ```
-   https://twoj-host/telegram/<TOKEN_BOTA>?secret=<WEBHOOK_SECRET>
+   https://twoj-host/telegram/<TOKEN_BOTA>?secret=<USER_BOT_WEBHOOK_SECRET>
    ```
-   Sekret w adresie musi odpowiadać wartości `WEBHOOK_SECRET` w `.env`.
+   Sekret w adresie musi odpowiadać wartości `USER_BOT_WEBHOOK_SECRET` w `.env`.
 
 ## Dodawanie botów
 
-Rejestrowanie botów odbywa się wyłącznie z poziomu czatu administracyjnego wskazanego w `ADMIN_CHAT_ID`.
+Rejestrowanie botów odbywa się wyłącznie z poziomu czatu administracyjnego wskazanego w `USER_BOT_ADMIN_CHAT_ID`.
 
 1. Upewnij się, że bot operatorski platformy został dodany do czatu administracyjnego i wywołaj w nim komendę `/start`. Bot pokaże menu z przyciskami: „Dodaj bota”, „Lista botów” oraz „Odśwież tokeny”.
 2. Z menu bota wybierz akcję „Dodaj bota” i wklej token otrzymany od [@BotFather](https://t.me/BotFather). W razie pomyłki możesz przerwać proces poleceniem `/anuluj`.
 3. Wybierz istniejącą personę z listy lub utwórz nową (bot poprosi o nazwę, opis oraz kod języka – domyślnie `auto`).
-4. Po zatwierdzeniu bot jest zapisywany w bazie danych i natychmiast dostępny. Cache tokenów odświeża się automatycznie, a jeśli ustawiono `WEBHOOK_BASE_URL`, aplikacja ustawi webhook w Telegramie za Ciebie.
+4. Po zatwierdzeniu bot jest zapisywany w bazie danych i natychmiast dostępny. Cache tokenów odświeża się automatycznie, a jeśli ustawiono `USER_BOT_WEBHOOK_BASE_URL`, aplikacja ustawi webhook w Telegramie za Ciebie.
 5. Aby wrócić do menu w dowolnym momencie, użyj komendy `/menu`.
 
 Lista botów oraz person jest dostępna z poziomu przycisku „Lista botów”. Każda pozycja zawiera nazwę i identyfikator rekordu w bazie, co ułatwia dalszą administrację.
@@ -82,7 +82,7 @@ Lista botów oraz person jest dostępna z poziomu przycisku „Lista botów”. 
 W razie potrzeby możesz też wymusić przeładowanie cache tokenów wywołując endpoint:
    ```bash
    curl -X POST \
-        -H "X-Telegram-Bot-Api-Secret-Token: ${WEBHOOK_SECRET}" \
+        -H "X-Telegram-Bot-Api-Secret-Token: ${USER_BOT_WEBHOOK_SECRET}" \
         http://localhost:8000/internal/reload-config
    ```
 
@@ -98,24 +98,24 @@ Manualne modyfikacje w bazie danych (np. poprzez `INSERT`) nie są wspierane i m
 
 2. **Inspekcja API** – odwiedź [http://localhost:8000/docs](http://localhost:8000/docs), aby upewnić się, że FastAPI wystawia dokumentację OpenAPI i endpointy działają.
 
-3. **Szybki test webhooka** – po ustawieniu webhooków w Telegramie możesz wysłać wiadomość do bota i obserwować logi aplikacji (`uvicorn` wypisze zdarzenia przychodzące). W przypadku problemów sprawdź nagłówki `X-Telegram-Bot-Api-Secret-Token` i upewnij się, że pokrywają się z `WEBHOOK_SECRET`.
+3. **Szybki test webhooka** – po ustawieniu webhooków w Telegramie możesz wysłać wiadomość do bota i obserwować logi aplikacji (`uvicorn` wypisze zdarzenia przychodzące). W przypadku problemów sprawdź nagłówki `X-Telegram-Bot-Api-Secret-Token` i upewnij się, że pokrywają się z `USER_BOT_WEBHOOK_SECRET`.
 6. **Skonfiguruj boty i webhooki Telegrama**
    - Upewnij się, że w tabeli `bots` znajdują się wpisy z uzupełnionym polem `api_token` oraz ustawioną flagą `is_active=true` (szczegóły znajdziesz w sekcji [Dodawanie pierwszego bota](#dodawanie-pierwszego-bota)).
-   - W `.env` ustaw zmienną `ADMIN_CHAT_ID` na identyfikator jedynego czatu administracyjnego. Wszyscy uczestnicy tego czatu uzyskają uprawnienia moderatorskie.
+   - W `.env` ustaw zmienną `USER_BOT_ADMIN_CHAT_ID` na identyfikator jedynego czatu administracyjnego. Wszyscy uczestnicy tego czatu uzyskają uprawnienia moderatorskie.
    - Wystaw publiczny adres HTTPS (np. za pomocą [ngrok](https://ngrok.com/)).
-   - Ustaw zmienną `WEBHOOK_BASE_URL` na publiczny adres (np. `https://twoj-host`). Dzięki temu aplikacja automatycznie ustawi lub zaktualizuje webhook po dodaniu bota.
+   - Ustaw zmienną `USER_BOT_WEBHOOK_BASE_URL` na publiczny adres (np. `https://twoj-host`). Dzięki temu aplikacja automatycznie ustawi lub zaktualizuje webhook po dodaniu bota.
    - Jeśli wolisz ręczną konfigurację, ustaw webhook na adres:
      ```
-     https://twoj-host/telegram/<TOKEN_BOTA>?secret=<WEBHOOK_SECRET>
+     https://twoj-host/telegram/<TOKEN_BOTA>?secret=<USER_BOT_WEBHOOK_SECRET>
      ```
-     Sekret (`WEBHOOK_SECRET`) musi zgadzać się z wartością w `.env`.
+     Sekret (`USER_BOT_WEBHOOK_SECRET`) musi zgadzać się z wartością w `.env`.
 
 ## Dodawanie pierwszego bota
 
 Po wykonaniu migracji baza danych jest pusta. Aby zarejestrować pierwszego bota operatorskiego i uruchomić panel administracyjny:
 
 1. **Skonfiguruj czat administracyjny w `.env`.**  
-   Ustaw `ADMIN_CHAT_ID` na identyfikator jedynego czatu administracyjnego (np. prywatnej grupy). Po zapisaniu pliku zrestartuj kontener `app` lub wywołaj endpoint `/internal/reload-config`, aby aplikacja wczytała nowe ustawienia.
+   Ustaw `USER_BOT_ADMIN_CHAT_ID` na identyfikator jedynego czatu administracyjnego (np. prywatnej grupy). Po zapisaniu pliku zrestartuj kontener `app` lub wywołaj endpoint `/internal/reload-config`, aby aplikacja wczytała nowe ustawienia.
 
 2. **Uruchom skrypt bootstrapujący bota operatorskiego.**  
    Skrypt tworzy (jeśli trzeba) personę operatorską i zapisuje token bota w tabeli `bots`. Uruchom go w kontenerze aplikacji:
@@ -131,7 +131,7 @@ Po wykonaniu migracji baza danych jest pusta. Aby zarejestrować pierwszego bota
 3. **Przeładuj cache tokenów (opcjonalnie, ale zalecane po bootstrapie).**
    ```bash
    curl -X POST \
-        -H "X-Telegram-Bot-Api-Secret-Token: ${WEBHOOK_SECRET}" \
+        -H "X-Telegram-Bot-Api-Secret-Token: ${USER_BOT_WEBHOOK_SECRET}" \
         http://localhost:8000/internal/reload-config
    ```
    Po tej operacji bot operatorski będzie dostępny w interfejsie.
@@ -140,7 +140,7 @@ Po wykonaniu migracji baza danych jest pusta. Aby zarejestrować pierwszego bota
    Zaproś bota na skonfigurowany czat administracyjny, wyślij `/start` i korzystaj z menu kontekstowego. Od tej chwili wszystkie dalsze operacje (tworzenie person, dodawanie kolejnych botów, zarządzanie nimi) wykonujesz już z poziomu czatu.
 
 5. **Skonfiguruj webhooki dla nowych botów.**  
-   Użyj procedury opisanej w sekcji [Skonfiguruj boty i webhooki Telegrama](#skonfiguruj-boty-i-webhooki-telegrama), aby każdy bot otrzymał poprawny adres webhooka i wspólny `WEBHOOK_SECRET`.
+   Użyj procedury opisanej w sekcji [Skonfiguruj boty i webhooki Telegrama](#skonfiguruj-boty-i-webhooki-telegrama), aby każdy bot otrzymał poprawny adres webhooka i wspólny `USER_BOT_WEBHOOK_SECRET`.
 
 ## Jak sprawdzić, czy aplikacja działa poprawnie?
 
@@ -152,7 +152,7 @@ Po wykonaniu migracji baza danych jest pusta. Aby zarejestrować pierwszego bota
 
 2. **Inspekcja API** – odwiedź [http://localhost:8000/docs](http://localhost:8000/docs), aby upewnić się, że FastAPI wystawia dokumentację OpenAPI i endpointy działają.
 
-3. **Szybki test webhooka** – po ustawieniu webhooków w Telegramie możesz wysłać wiadomość do bota i obserwować logi aplikacji (`uvicorn` wypisze zdarzenia przychodzące). W przypadku problemów sprawdź nagłówki `X-Telegram-Bot-Api-Secret-Token` i upewnij się, że pokrywają się z `WEBHOOK_SECRET`.
+3. **Szybki test webhooka** – po ustawieniu webhooków w Telegramie możesz wysłać wiadomość do bota i obserwować logi aplikacji (`uvicorn` wypisze zdarzenia przychodzące). W przypadku problemów sprawdź nagłówki `X-Telegram-Bot-Api-Secret-Token` i upewnij się, że pokrywają się z `USER_BOT_WEBHOOK_SECRET`.
 
 ## Uruchomienie przez Docker Compose
 
@@ -160,7 +160,7 @@ Po wykonaniu migracji baza danych jest pusta. Aby zarejestrować pierwszego bota
    ```bash
    cp .env.example .env
    ```
-2. (Opcjonalnie) jeżeli port `8100` na hoście jest zajęty, ustaw w `.env` zmienną `APP_HOST_PORT` na wolny numer (np. `8080`).
+2. (Opcjonalnie) jeżeli port `8100` na hoście jest zajęty, ustaw w `.env` zmienną `USER_BOT_APP_HOST_PORT` na wolny numer (np. `8080`).
 
 3. Zbuduj obraz i wystartuj usługi (aplikacja + PostgreSQL):
    ```bash
@@ -195,11 +195,11 @@ Po skopiowaniu `.env.example` uzupełnij przede wszystkim poniższe wpisy:
 
 | Zmienna | Jak zdobyć / rekomendowana wartość |
 | --- | --- |
-| `WEBHOOK_SECRET` | Dowolny losowy, trudny do odgadnięcia ciąg znaków. Można go wygenerować poleceniem `openssl rand -hex 32`. Wartość ta trafia do parametru `secret` podczas konfiguracji webhooków i zabezpiecza endpointy przed nieautoryzowanym użyciem. |
-| `WEBHOOK_BASE_URL` | Publiczny adres HTTPS instancji (np. `https://bot.example.com`). Dzięki niemu aplikacja automatycznie ustawia webhooki po dodaniu lub aktualizacji bota. Pozostaw puste, jeśli chcesz wykonywać tę operację ręcznie. |
-| `ADMIN_CHAT_ID` | Identyfikator jedynego czatu administracyjnego w Telegramie. Dla supergrup Telegram zwraca wartości ujemne (np. `-1001234567890`) – przepisz je dokładnie z botów typu `@RawDataBot`. Wszyscy uczestnicy tego czatu uzyskują uprawnienia moderatorskie, a ich akcje są rejestrowane z użyciem surowego ID czatu. |
-| `DATABASE_URL` | Adres połączenia z bazą PostgreSQL w formacie `postgresql+asyncpg://user:password@host:port/database`. W środowisku Docker Compose domyślny wpis z `.env.example` będzie poprawny. |
-| `MODERATION_CHAT_ID` | Liczbowe ID czatu (lub kanału) Telegram, w którym moderatorzy mają otrzymywać powiadomienia. Najłatwiej je pozyskać wysyłając dowolną wiadomość do bota `@userinfobot` z danego czatu lub korzystając z narzędzi typu [@RawDataBot](https://t.me/RawDataBot). |
+| `USER_BOT_WEBHOOK_SECRET` | Dowolny losowy, trudny do odgadnięcia ciąg znaków. Można go wygenerować poleceniem `openssl rand -hex 32`. Wartość ta trafia do parametru `secret` podczas konfiguracji webhooków i zabezpiecza endpointy przed nieautoryzowanym użyciem (dla zgodności nadal działa dawne `WEBHOOK_SECRET`). |
+| `USER_BOT_WEBHOOK_BASE_URL` | Publiczny adres HTTPS instancji (np. `https://bot.example.com`). Dzięki niemu aplikacja automatycznie ustawia webhooki po dodaniu lub aktualizacji bota. Pozostaw puste, jeśli chcesz wykonywać tę operację ręcznie. |
+| `USER_BOT_ADMIN_CHAT_ID` | Identyfikator jedynego czatu administracyjnego w Telegramie. Dla supergrup Telegram zwraca wartości ujemne (np. `-1001234567890`) – przepisz je dokładnie z botów typu `@RawDataBot`. Wszyscy uczestnicy tego czatu uzyskują uprawnienia moderatorskie, a ich akcje są rejestrowane z użyciem surowego ID czatu. |
+| `USER_BOT_DATABASE_URL` | Adres połączenia z bazą PostgreSQL w formacie `postgresql+asyncpg://user:password@host:port/database`. W środowisku Docker Compose domyślny wpis z `.env.example` będzie poprawny. |
+| `USER_BOT_MODERATION_CHAT_ID` | Liczbowe ID czatu (lub kanału) Telegram, w którym moderatorzy mają otrzymywać powiadomienia. Najłatwiej je pozyskać wysyłając dowolną wiadomość do bota `@userinfobot` z danego czatu lub korzystając z narzędzi typu [@RawDataBot](https://t.me/RawDataBot). |
 
 Pozostałe wartości (limity, ceny, ustawienia logowania) można zostawić domyślne lub dostosować do potrzeb. Aplikacja wspiera „hot reload” konfiguracji – zmiana `.env` i ponowne przeładowanie zmiennych środowiskowych (np. restart procesu lub odczyt w harmonogramie) aktualizuje limity w locie.
 
@@ -213,7 +213,7 @@ Repozytorium zawiera gotową konfigurację Alembic (`alembic.ini` oraz katalog `
 alembic upgrade head
 ```
 
-Pamiętaj o ustawieniu zmiennej `DATABASE_URL` przed uruchomieniem polecenia (np. `export DATABASE_URL=postgresql+asyncpg://user:pass@localhost:5432/dbname`).
+Pamiętaj o ustawieniu zmiennej `USER_BOT_DATABASE_URL` przed uruchomieniem polecenia (np. `export USER_BOT_DATABASE_URL=postgresql+asyncpg://user:pass@localhost:5432/dbname`; starsza nazwa `DATABASE_URL` nadal jest rozpoznawana).
 
 ## Testy
 
@@ -250,18 +250,18 @@ Na serwerze możesz uruchomić `./deploy.sh`. Skrypt automatycznie wczytuje zmie
 wykonuje `docker compose pull`, `docker compose up -d --build`, uruchamia migracje Alembic
 (`docker compose run --rm app alembic upgrade head`) oraz sprząta obrazy (`docker image prune -f`).
 Jeżeli repozytorium znajduje się w innym katalogu niż katalog skryptu, ustaw zmienną
-`REPO_DIR=/ścieżka/do/user_bot` przed uruchomieniem.
+`USER_BOT_REPO_DIR=/ścieżka/do/user_bot` przed uruchomieniem (starsze `REPO_DIR` nadal jest obsługiwane).
 
 Skrypt sprawdza teraz, czy we wskazanym katalogu dostępny jest plik(a) Docker Compose (domyślnie
-`docker-compose.yml`, można go nadpisać zmienną `COMPOSE_FILE`). Przy jego braku zostanie
+`docker-compose.yml`, można go nadpisać zmienną `USER_BOT_COMPOSE_FILE`). Przy jego braku zostanie
 zwrócony czytelny komunikat zamiast komunikatu z `docker compose`.
 
-Jeżeli ustawisz zmienną `IMAGE`, zostanie ona użyta jako źródło obrazu aplikacji – skrypt wykona
-logowanie do GHCR (jeśli podano `GHCR_USER` i `GHCR_PAT`), pobierze obraz i uruchomi kontenery
+Jeżeli ustawisz zmienną `USER_BOT_IMAGE`, zostanie ona użyta jako źródło obrazu aplikacji – skrypt wykona
+logowanie do GHCR (jeśli podano `USER_BOT_GHCR_USER` i `USER_BOT_GHCR_PAT`), pobierze obraz i uruchomi kontenery
 bez przebudowy lokalnej (`docker compose up --no-build`). Aby wymusić budowanie mimo ustawionego
-obrazu, ustaw `FORCE_BUILD=1`.
+obrazu, ustaw `USER_BOT_FORCE_BUILD=1`.
 
-Na serwerze możesz także skopiować `deploy/.env.production` do `/opt/user_bot/.env` i ewentualnie zaktualizować wartości dla środowiska produkcyjnego (np. `DATABASE_URL`, `WEBHOOK_SECRET`). Skrypt `deploy.sh` automatycznie wczyta ten plik podczas uruchomienia.
+Na serwerze możesz także skopiować `deploy/.env.production` do `/opt/user_bot/.env` i ewentualnie zaktualizować wartości dla środowiska produkcyjnego (np. `USER_BOT_DATABASE_URL`, `USER_BOT_WEBHOOK_SECRET`). Skrypt `deploy.sh` automatycznie wczyta ten plik podczas uruchomienia.
 
 ## HTTPS / certyfikaty Let's Encrypt
 

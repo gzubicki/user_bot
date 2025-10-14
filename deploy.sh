@@ -2,8 +2,8 @@
 set -euo pipefail
 
 SCRIPT_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
-REPO_DIR="${REPO_DIR:-$SCRIPT_DIR}"
-ENV_FILE="${ENV_FILE:-$REPO_DIR/.env}"
+REPO_DIR="${USER_BOT_REPO_DIR:-${REPO_DIR:-$SCRIPT_DIR}}"
+ENV_FILE="${USER_BOT_ENV_FILE:-${ENV_FILE:-$REPO_DIR/.env}}"
 
 # wczytaj zmienne z .env (jeśli istnieje) – tak jak w content_manager
 set -a
@@ -13,7 +13,7 @@ set +a
 cd "$REPO_DIR"
 
 DEFAULT_COMPOSE_FILE="docker-compose.yml"
-COMPOSE_FILE_ENV="${COMPOSE_FILE:-}"
+COMPOSE_FILE_ENV="${USER_BOT_COMPOSE_FILE:-${COMPOSE_FILE:-}}"
 if [[ -n "$COMPOSE_FILE_ENV" ]]; then
   IFS=':' read -r -a compose_files_input <<<"$COMPOSE_FILE_ENV"
 else
@@ -46,22 +46,27 @@ compose_cmd=(docker compose "${COMPOSE_ARGS[@]}")
 
 
 # jeśli podane GHCR_USER/GHCR_PAT/IMAGE i brak logowania – zaloguj jak w content_manager
-if [[ -n "${GHCR_USER:-}" && -n "${GHCR_PAT:-}" && -n "${IMAGE:-}" ]]; then
-  if ! docker pull "$IMAGE" >/dev/null 2>&1; then
+GHCR_USER_VALUE="${USER_BOT_GHCR_USER:-${GHCR_USER:-}}"
+GHCR_PAT_VALUE="${USER_BOT_GHCR_PAT:-${GHCR_PAT:-}}"
+IMAGE_VALUE="${USER_BOT_IMAGE:-${IMAGE:-}}"
+FORCE_BUILD_VALUE="${USER_BOT_FORCE_BUILD:-${FORCE_BUILD:-0}}"
+
+if [[ -n "$GHCR_USER_VALUE" && -n "$GHCR_PAT_VALUE" && -n "$IMAGE_VALUE" ]]; then
+  if ! docker pull "$IMAGE_VALUE" >/dev/null 2>&1; then
     echo "🔐 Logowanie do ghcr.io…" >&2
-    echo "$GHCR_PAT" | docker login ghcr.io -u "$GHCR_USER" --password-stdin
+    echo "$GHCR_PAT_VALUE" | docker login ghcr.io -u "$GHCR_USER_VALUE" --password-stdin
   fi
 fi
 echo "🚀 Deploy: aktualizacja kontenerów" >&2
 
-if [[ -n "${IMAGE:-}" ]]; then
+if [[ -n "$IMAGE_VALUE" ]]; then
   "${compose_cmd[@]}" pull
 else
   "${compose_cmd[@]}" pull --ignore-pull-failures
 fi
 
 up_args=(-d)
-if [[ -n "${IMAGE:-}" && "${FORCE_BUILD:-0}" != "1" ]]; then
+if [[ -n "$IMAGE_VALUE" && "$FORCE_BUILD_VALUE" != "1" ]]; then
   up_args=(--no-build "${up_args[@]}")
 else
   up_args=(--build "${up_args[@]}")
