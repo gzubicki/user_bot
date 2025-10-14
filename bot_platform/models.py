@@ -71,6 +71,7 @@ class Persona(Base):
     is_active: Mapped[bool] = mapped_column(Boolean, default=True, nullable=False)
 
     aliases: Mapped[list["PersonaAlias"]] = relationship("PersonaAlias", back_populates="persona")
+    identities: Mapped[list["PersonaIdentity"]] = relationship("PersonaIdentity", back_populates="persona")
     bots: Mapped[list[Bot]] = relationship("Bot", back_populates="persona")
 
 
@@ -93,6 +94,32 @@ class PersonaAlias(Base):
 
     persona: Mapped["Persona"] = relationship("Persona", back_populates="aliases")
 
+
+class PersonaIdentity(Base):
+    __tablename__ = "persona_identities"
+    __table_args__ = (
+        CheckConstraint(
+            "telegram_user_id IS NOT NULL OR telegram_username IS NOT NULL OR display_name IS NOT NULL",
+            name="ck_persona_identity_has_any_identifier",
+        ),
+        Index("ix_persona_identity_user_id", "telegram_user_id"),
+        Index("ix_persona_identity_username", "telegram_username"),
+    )
+
+    id: Mapped[int] = mapped_column(Integer, primary_key=True, autoincrement=True)
+    persona_id: Mapped[int] = mapped_column(ForeignKey("personas.id", ondelete="CASCADE"), nullable=False)
+    telegram_user_id: Mapped[Optional[int]] = mapped_column(BigInteger, nullable=True)
+    telegram_username: Mapped[Optional[str]] = mapped_column(String(255), nullable=True)
+    display_name: Mapped[Optional[str]] = mapped_column(String(255), nullable=True)
+    added_by_user_id: Mapped[Optional[int]] = mapped_column(BigInteger, nullable=True)
+    added_in_chat_id: Mapped[Optional[int]] = mapped_column(BigInteger, nullable=True)
+    added_at: Mapped[datetime] = mapped_column(DateTime(timezone=True), default=datetime.utcnow, nullable=False)
+    removed_at: Mapped[Optional[datetime]] = mapped_column(DateTime(timezone=True), default=None)
+    removed_by_user_id: Mapped[Optional[int]] = mapped_column(BigInteger, nullable=True)
+    removed_in_chat_id: Mapped[Optional[int]] = mapped_column(BigInteger, nullable=True)
+
+    persona: Mapped["Persona"] = relationship("Persona", back_populates="identities")
+
 class Submission(Base):
     __tablename__ = "submissions"
     __table_args__ = (
@@ -104,6 +131,8 @@ class Submission(Base):
     persona_id: Mapped[int] = mapped_column(ForeignKey("personas.id", ondelete="CASCADE"), nullable=False)
     submitted_by_user_id: Mapped[int] = mapped_column(BigInteger, nullable=False)
     submitted_chat_id: Mapped[int] = mapped_column(BigInteger, nullable=False)
+    submitted_by_username: Mapped[Optional[str]] = mapped_column(String(255), nullable=True)
+    submitted_by_name: Mapped[Optional[str]] = mapped_column(String(255), nullable=True)
     media_type: Mapped[MediaType] = mapped_column(
         Enum(
             MediaType,

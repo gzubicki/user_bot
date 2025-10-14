@@ -14,7 +14,9 @@ from ..models import MediaType, ModerationAction, ModerationStatus, Submission
 async def list_pending_submissions(session: AsyncSession, *, persona_id: Optional[int] = None) -> list[Submission]:
     stmt = (
         select(Submission)
-        .options(selectinload(Submission.persona))
+        .options(
+            selectinload(Submission.persona).selectinload("identities")
+        )
         .where(Submission.status == ModerationStatus.PENDING)
     )
     if persona_id is not None:
@@ -27,7 +29,9 @@ async def list_pending_submissions(session: AsyncSession, *, persona_id: Optiona
 async def get_submission_by_id(session: AsyncSession, submission_id: int) -> Optional[Submission]:
     stmt = (
         select(Submission)
-        .options(selectinload(Submission.persona))
+        .options(
+            selectinload(Submission.persona).selectinload("identities")
+        )
         .where(Submission.id == submission_id)
     )
     result = await session.execute(stmt)
@@ -40,6 +44,8 @@ async def create_submission(
     persona_id: int,
     submitted_by_user_id: int,
     submitted_chat_id: int,
+    submitted_by_username: Optional[str] = None,
+    submitted_by_name: Optional[str] = None,
     media_type: MediaType,
     text_content: Optional[str] = None,
     file_id: Optional[str] = None,
@@ -49,6 +55,8 @@ async def create_submission(
         persona_id=persona_id,
         submitted_by_user_id=submitted_by_user_id,
         submitted_chat_id=submitted_chat_id,
+        submitted_by_username=submitted_by_username,
+        submitted_by_name=submitted_by_name,
         media_type=media_type.value if isinstance(media_type, MediaType) else media_type,
         text_content=text_content,
         file_id=file_id,
