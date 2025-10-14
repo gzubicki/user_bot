@@ -3,9 +3,12 @@ from __future__ import annotations
 
 from dataclasses import dataclass
 from datetime import datetime, timedelta
-from typing import Dict
+import hashlib
+from typing import Dict, Iterable, Tuple
 
-from sqlalchemy import select
+from sqlalchemy import func, select
+from sqlalchemy.ext.asyncio import AsyncSession
+from sqlalchemy.orm import selectinload
 
 from ..database import get_session
 from ..models import Bot
@@ -76,9 +79,80 @@ async def refresh_bot_token_cache() -> Dict[str, ActiveBotToken]:
     return await get_active_bot_tokens(force_refresh=True)
 
 
+def _hash_token(token: str) -> str:
+    return hashlib.sha512(token.encode()).hexdigest()
+
+
+async def count_bots(session: AsyncSession) -> int:
+    result = await session.execute(select(func.count(Bot.id)))
+    return int(result.scalar_one())
+
+
+class BotLimitExceededError(Exception):
+    """Podnoszone, gdy osiągnięto limit liczby botów."""
+
+
+async def upsert_bot(
+    session: AsyncSession,
+    *,
+    token: str,
+    display_name: str,
+    persona_id: int,
+) -> Tuple[Bot, bool]:
+    """Dodaj nowego bota lub zaktualizuj istniejącego.
+
+    Zwraca krotkę (bot, created), gdzie created informuje czy rekord był nowy.
+    """
+
+    token_hash = _hash_token(token)
+    existing_bot = (
+        await session.execute(select(Bot).where(Bot.token_hash == token_hash))
+    ).scalars().first()
+
+    created = False
+    if existing_bot is None:
+        total = await count_bots(session)
+        from ..config import get_settings
+
+        max_allowed = get_settings().rate_limits.max_bots_total
+        if total >= max_allowed:
+            raise BotLimitExceededError(f"Limit {max_allowed} botów został osiągnięty.")
+
+        bot = Bot(
+            api_token=token,
+            token_hash=token_hash,
+            display_name=display_name,
+            persona_id=persona_id,
+            created_at=datetime.utcnow(),
+            is_active=True,
+        )
+        session.add(bot)
+        created = True
+    else:
+        bot = existing_bot
+        bot.api_token = token
+        bot.token_hash = token_hash
+        bot.display_name = display_name
+        bot.persona_id = persona_id
+        bot.is_active = True
+
+    await session.flush()
+    return bot, created
+
+
+async def list_bots(session: AsyncSession) -> Iterable[Bot]:
+    stmt = select(Bot).options(selectinload(Bot.persona)).order_by(Bot.created_at.desc())
+    result = await session.execute(stmt)
+    return list(result.scalars().all())
+
+
 __all__ = [
     "ActiveBotToken",
     "get_active_bot_tokens",
     "get_bot_by_token",
     "refresh_bot_token_cache",
+    "count_bots",
+    "upsert_bot",
+    "BotLimitExceededError",
+    "list_bots",
 ]

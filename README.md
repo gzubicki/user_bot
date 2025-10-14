@@ -71,10 +71,15 @@ README.md
 
 Rejestrowanie botów odbywa się wyłącznie z poziomu czatu administracyjnego wskazanego w `ADMIN_CHAT_ID`.
 
-1. Upewnij się, że bot operatorski platformy został dodany do czatu administracyjnego i wywołaj w nim komendę `/start`.
-2. Z menu bota wybierz akcję „Dodaj bota” (lub odpowiadającą jej komendę tekstową) i wklej token otrzymany od [@BotFather](https://t.me/BotFather).
-3. Wybierz lub utwórz personę, która ma być przypisana do nowego bota. Platforma poprosi o opis i język, aby spójnie odpowiadać użytkownikom.
-4. Po zatwierdzeniu bot jest zapisywany w bazie danych i natychmiast dostępny. W razie potrzeby możesz wymusić przeładowanie cache tokenów wywołując endpoint:
+1. Upewnij się, że bot operatorski platformy został dodany do czatu administracyjnego i wywołaj w nim komendę `/start`. Bot pokaże menu z przyciskami: „Dodaj bota”, „Lista botów” oraz „Odśwież tokeny”.
+2. Z menu bota wybierz akcję „Dodaj bota” i wklej token otrzymany od [@BotFather](https://t.me/BotFather). W razie pomyłki możesz przerwać proces poleceniem `/anuluj`.
+3. Wybierz istniejącą personę z listy lub utwórz nową (bot poprosi o nazwę, opis oraz kod języka – domyślnie `auto`).
+4. Po zatwierdzeniu bot jest zapisywany w bazie danych i natychmiast dostępny. Cache tokenów odświeża się automatycznie, możesz też użyć z menu przycisku „Odśwież tokeny”, aby zrobić to ręcznie.
+5. Aby wrócić do menu w dowolnym momencie, użyj komendy `/menu`.
+
+Lista botów oraz person jest dostępna z poziomu przycisku „Lista botów”. Każda pozycja zawiera nazwę i identyfikator rekordu w bazie, co ułatwia dalszą administrację.
+
+W razie potrzeby możesz też wymusić przeładowanie cache tokenów wywołując endpoint:
    ```bash
    curl -X POST \
         -H "X-Telegram-Bot-Api-Secret-Token: ${WEBHOOK_SECRET}" \
