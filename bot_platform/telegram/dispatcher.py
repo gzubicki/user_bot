@@ -1,6 +1,7 @@
 """Aiogram dispatcher factory and admin chat handlers."""
 from __future__ import annotations
 
+import re
 import html
 from datetime import datetime
 from dataclasses import dataclass
@@ -19,9 +20,10 @@ from ..config import get_settings
 from ..database import get_session
 from ..models import MediaType, ModerationStatus, Submission
 from ..services import bots as bots_service
-from ..services import moderation as moderation_service
+from ..models import MediaType, Quote
 from ..services import personas as personas_service
 from ..services import quotes as quotes_service
+from ..services import moderation as moderation_service
 from .states import AddBotStates, EditBotStates, ModerationStates
 
 
@@ -110,7 +112,8 @@ def build_dispatcher(
     admin_router = Router(name=f"admin-router-{bot_id or 'default'}")
     admin_router.message.filter(lambda message: _is_admin_chat_id(message.chat.id))
     admin_router.callback_query.filter(
-        lambda callback: callback.message is not None and _is_admin_chat_id(callback.message.chat.id)
+        lambda callback: callback.message is not None
+        and _is_admin_chat_id(callback.message.chat.id)
     )
 
     async def _send_menu(
@@ -1041,8 +1044,175 @@ def build_dispatcher(
         else:
             await target.answer(summary, reply_markup=_main_menu_keyboard().as_markup())
 
-    dispatcher.include_router(admin_router)
+    async def _get_bot_identity() -> tuple[int, Optional[str]]:
+        nonlocal bot
+        if not hasattr(_get_bot_identity, "_cache"):
+            _get_bot_identity._cache = {}
 
+        cache = getattr(_get_bot_identity, "_cache")
+        cached = cache.get(bot.token)
+        if cached is not None:
+            return cached
+
+        profile = await bot.get_me()
+        username = profile.username.lower() if profile.username else None
+        cached_value = (profile.id, username)
+        cache[bot.token] = cached_value
+        return cached_value
+
+    def _strip_bot_mentions(text: str, username: Optional[str]) -> str:
+        if not text:
+            return ""
+
+        cleaned = text
+        if username:
+            mention_pattern = re.compile(rf"@{re.escape(username)}", re.IGNORECASE)
+            cleaned = mention_pattern.sub(" ", cleaned)
+        cleaned = re.sub(r"/[-_\w]+(?:@[-_\w]+)?", " ", cleaned)
+        return " ".join(cleaned.split())
+
+    def _collect_message_context(message: Message, username: Optional[str]) -> str:
+        parts: list[str] = []
+        primary_text = message.text or message.caption or ""
+        cleaned_primary = _strip_bot_mentions(primary_text, username)
+        if cleaned_primary:
+            parts.append(cleaned_primary)
+
+        reply = message.reply_to_message
+        if reply:
+            reply_text = reply.text or reply.caption or ""
+            if reply_text:
+                parts.append(reply_text)
+
+        combined = "\n".join(part for part in parts if part).strip()
+        if not combined and reply:
+            combined = (reply.text or reply.caption or "").strip()
+        return combined
+
+    async def _is_direct_invocation(message: Message) -> bool:
+        content = (message.text or message.caption or "").strip()
+        if not content:
+            return False
+
+        chat_type = getattr(message.chat, "type", "")
+        if chat_type == "private":
+            return True
+
+        bot_id, username = await _get_bot_identity()
+
+        reply = message.reply_to_message
+        if (
+            reply
+            and reply.from_user is not None
+            and reply.from_user.is_bot
+            and reply.from_user.id == bot_id
+        ):
+            return True
+
+        def _check_entities(entities: Optional[list], text: str) -> bool:
+            if not entities or not text:
+                return False
+            for entity in entities:
+                snippet = text[entity.offset : entity.offset + entity.length]
+                entity_type = getattr(entity, "type", "")
+                if entity_type == "mention" and username and snippet.lower() == f"@{username}":
+                    return True
+                if entity_type == "text_mention" and getattr(entity, "user", None):
+                    if entity.user.id == bot_id:
+                        return True
+                if entity_type == "bot_command":
+                    command = snippet.lower()
+                    if username and command.endswith(f"@{username}"):
+                        return True
+                    if chat_type == "private":
+                        return True
+            return False
+
+        if _check_entities(message.entities, message.text or ""):
+            return True
+        if _check_entities(message.caption_entities, message.caption or ""):
+            return True
+
+        if username and f"@{username}" in content.lower():
+            return True
+
+        return False
+
+    async def _reply_with_quote(message: Message, quote: Quote) -> None:
+        text_payload = (quote.text_content or "").strip() or "…"
+        try:
+            if quote.media_type == MediaType.TEXT or not quote.file_id:
+                await message.answer(text_payload)
+            elif quote.media_type == MediaType.IMAGE:
+                await message.answer_photo(quote.file_id, caption=text_payload if quote.text_content else None)
+            elif quote.media_type == MediaType.AUDIO:
+                await message.answer_audio(quote.file_id, caption=text_payload if quote.text_content else None)
+            else:
+                await message.answer(text_payload)
+        except TelegramBadRequest:
+            await message.answer(text_payload)
+
+    async def _resolve_language_priority(persona_language: Optional[str], message: Message) -> list[str]:
+        priority: list[str] = []
+        user_language = getattr(message.from_user, "language_code", None)
+        if user_language:
+            priority.append(user_language)
+        if persona_language and persona_language not in {"", "auto"}:
+            priority.append(persona_language)
+
+        prepared: list[str] = []
+        seen: set[str] = set()
+        for lang in priority:
+            normalized = lang.lower()
+            if "-" in normalized:
+                normalized = normalized.split("-", 1)[0]
+            if normalized not in seen:
+                seen.add(normalized)
+                prepared.append(normalized)
+        return prepared
+
+    public_router = Router(name=f"public-router-{bot_id or 'default'}")
+    public_router.message.filter(lambda message: not _is_admin_chat_id(message.chat.id))
+
+    @public_router.message(F.text | F.caption)
+    async def handle_public_invocation(message: Message) -> None:
+        if message.from_user and message.from_user.is_bot:
+            return
+
+        if not await _is_direct_invocation(message):
+            return
+
+        if bot_id is None:
+            await message.answer("Ten bot nie jest jeszcze skonfigurowany – brak powiązanej persony.")
+            return
+
+        async with get_session() as session:
+            bot_record = await bots_service.get_bot_by_id(session, bot_id)
+            persona = bot_record.persona if bot_record else None
+            if persona is None:
+                await message.answer("Nie odnaleziono persony bota ani powiązanych cytatów.")
+                return
+
+            bot_identity = await _get_bot_identity()
+            _, username = bot_identity
+            query = _collect_message_context(message, username)
+
+            language_priority = await _resolve_language_priority(persona.language, message)
+            quote = await quotes_service.select_relevant_quote(
+                session,
+                persona,
+                query=query,
+                language_priority=language_priority,
+            )
+
+        if quote is None:
+            await message.answer("Niestety, nie znalazłem odpowiedniego cytatu.")
+            return
+
+        await _reply_with_quote(message, quote)
+
+    dispatcher.include_router(admin_router)
+    dispatcher.include_router(public_router)
     user_router = Router(name=f"user-router-{bot_id or 'default'}")
     user_router.message.filter(lambda message: not _is_admin_chat_id(message.chat.id))
 
