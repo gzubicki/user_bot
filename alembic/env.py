@@ -10,6 +10,7 @@ from alembic import context
 from sqlalchemy.engine import Connection
 from sqlalchemy.ext.asyncio import AsyncEngine, create_async_engine
 
+from bot_platform.database import should_enable_pre_ping
 from bot_platform.models import Base
 
 # Alembic Config object, dostępny w pliku ini.
@@ -76,7 +77,9 @@ async def run_migrations_online() -> None:
     """Wykonuje migracje w trybie online z użyciem asynchronicznego silnika."""
     # Build dedicated engine for migrations to avoid loading full application settings.
     database_url = _get_sqlalchemy_url()
-    connectable: AsyncEngine = create_async_engine(database_url, pool_pre_ping=True)
+    connectable: AsyncEngine = create_async_engine(
+        database_url, pool_pre_ping=should_enable_pre_ping(database_url)
+    )
 
     async with connectable.connect() as connection:
         await connection.run_sync(do_run_migrations)
