@@ -247,7 +247,7 @@ def build_dispatcher(
             submissions = await moderation_service.list_pending_submissions(
                 session, persona_id=persona_filter
             )
-        return [_snapshot_submission(item) for item in submissions]
+            return [_snapshot_submission(item) for item in submissions]
 
     async def _compose_submission_view(snapshot: dict[str, Any]) -> tuple[str, InlineKeyboardMarkup, MediaType]:
         try:
@@ -1407,6 +1407,7 @@ def build_dispatcher(
                 file_id=file_id,
             )
             await session.commit()
+            submission_snapshot = _snapshot_submission(submission)
 
         await message.answer("Dziękujemy! Twoja propozycja trafiła do kolejki moderacji.")
 
@@ -1430,7 +1431,7 @@ def build_dispatcher(
             if preview:
                 summary_lines.append("")
                 summary_lines.append(html.escape(preview[:200]))
-            snapshot = _snapshot_submission(submission)
+            snapshot = submission_snapshot
             if persona_name:
                 snapshot["persona_name"] = persona_name
             try:
