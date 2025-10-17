@@ -124,6 +124,39 @@ async def random_quote(session: AsyncSession, persona: Persona) -> Optional[Quot
     return quote
 
 
+async def get_quote_by_id(session: AsyncSession, quote_id: int) -> Optional[Quote]:
+    stmt = select(Quote).where(Quote.id == quote_id)
+    result = await session.execute(stmt)
+    quote = result.scalars().first()
+    if quote is None:
+        logger.warning("Nie znaleziono cytatu o ID=%s", quote_id)
+    else:
+        logger.debug(
+            "Odczytano cytat ID=%s dla persony ID=%s", quote.id, quote.persona_id
+        )
+    return quote
+
+
+async def delete_quote(
+    session: AsyncSession,
+    quote: Quote,
+    *,
+    removed_by_user_id: Optional[int] = None,
+    removed_in_chat_id: Optional[int] = None,
+) -> None:
+    quote_id = quote.id
+    persona_id = quote.persona_id
+    await session.delete(quote)
+    await session.flush()
+    logger.warning(
+        "Usunięto cytat ID=%s (persona_id=%s, removed_by=%s, chat_id=%s)",
+        quote_id,
+        persona_id,
+        removed_by_user_id,
+        removed_in_chat_id,
+    )
+
+
 def _normalized_quote_text_expression() -> Any:
     text_column = func.coalesce(Quote.text_content, "")
     trimmed = func.trim(text_column)
@@ -381,6 +414,8 @@ async def create_quote_from_submission(
 __all__ = [
     "count_quotes",
     "random_quote",
+    "get_quote_by_id",
+    "delete_quote",
     "find_quotes_by_language",
     "choose_best_quote",
     "search_quotes_by_relevance",
