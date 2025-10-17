@@ -25,3 +25,10 @@ class EditBotStates(StatesGroup):
 
 class ModerationStates(StatesGroup):
     reviewing = State()
+
+
+class IdentityStates(StatesGroup):
+    choosing_persona = State()
+    managing_persona = State()
+    waiting_identity_payload = State()
+    choosing_identity_to_remove = State()

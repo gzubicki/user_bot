@@ -1,9 +1,13 @@
-"""Helpers related to persona identity verification."""
+"""Helpers related to persona identity management and verification."""
 from __future__ import annotations
 
 import re
 from dataclasses import dataclass
+from datetime import UTC, datetime
 from typing import Optional
+
+from sqlalchemy import case, select
+from sqlalchemy.ext.asyncio import AsyncSession
 
 from ..models import Persona, PersonaIdentity, Submission
 
@@ -62,8 +66,10 @@ def _to_descriptor(identity: PersonaIdentity) -> IdentityDescriptor:
     )
 
 
-def describe_identity(descriptor: IdentityDescriptor) -> str:
-    """Return a human-readable summary of an identity descriptor."""
+def describe_identity(identity: IdentityDescriptor | PersonaIdentity) -> str:
+    """Return a human-readable summary of an identity record or descriptor."""
+
+    descriptor = identity if isinstance(identity, IdentityDescriptor) else _to_descriptor(identity)
 
     parts: list[str] = []
     if descriptor.telegram_user_id is not None:
@@ -188,10 +194,151 @@ def evaluate_submission_identity(submission: Submission) -> IdentityMatchResult:
     )
 
 
+def _sanitize_username(value: Optional[str]) -> Optional[str]:
+    if not value:
+        return None
+    candidate = value.strip()
+    if candidate.startswith("@"):
+        candidate = candidate[1:]
+    candidate = candidate.strip()
+    return candidate or None
+
+
+def _sanitize_display_name(value: Optional[str]) -> Optional[str]:
+    if not value:
+        return None
+    candidate = re.sub(r"\s+", " ", value).strip()
+    return candidate or None
+
+
+def _prepare_identity_query(persona: Persona, include_removed: bool):
+    stmt = select(PersonaIdentity).where(PersonaIdentity.persona_id == persona.id)
+    if not include_removed:
+        stmt = stmt.where(PersonaIdentity.removed_at.is_(None))
+    order_clause = case((PersonaIdentity.removed_at.is_(None), 0), else_=1)
+    stmt = stmt.order_by(order_clause, PersonaIdentity.id.asc())
+    return stmt
+
+
+async def list_persona_identities(
+    session: AsyncSession,
+    persona: Persona,
+    *,
+    include_removed: bool = False,
+) -> list[PersonaIdentity]:
+    stmt = _prepare_identity_query(persona, include_removed)
+    result = await session.execute(stmt)
+    return list(result.scalars().all())
+
+
+async def get_identity_by_id(session: AsyncSession, identity_id: int) -> Optional[PersonaIdentity]:
+    result = await session.execute(
+        select(PersonaIdentity).where(PersonaIdentity.id == identity_id)
+    )
+    return result.scalars().first()
+
+
+async def add_identity(
+    session: AsyncSession,
+    persona: Persona,
+    *,
+    telegram_user_id: Optional[int] = None,
+    telegram_username: Optional[str] = None,
+    display_name: Optional[str] = None,
+    admin_user_id: Optional[int],
+    admin_chat_id: Optional[int],
+) -> PersonaIdentity:
+    if not any([telegram_user_id, telegram_username, display_name]):
+        raise ValueError("Identity must contain at least one identifier")
+
+    sanitized_username = _sanitize_username(telegram_username)
+    sanitized_display_name = _sanitize_display_name(display_name)
+    normalized_username = _normalise_username(sanitized_username)
+    normalized_display_name = _normalise_name(sanitized_display_name)
+
+    existing_stmt = select(PersonaIdentity).where(PersonaIdentity.persona_id == persona.id)
+    result = await session.execute(existing_stmt)
+
+    matching: Optional[PersonaIdentity] = None
+    for record in result.scalars():
+        if telegram_user_id is not None and record.telegram_user_id == telegram_user_id:
+            matching = record
+            break
+        if (
+            normalized_username
+            and record.telegram_username
+            and _normalise_username(record.telegram_username) == normalized_username
+        ):
+            matching = record
+            break
+        if (
+            normalized_display_name
+            and record.display_name
+            and _normalise_name(record.display_name) == normalized_display_name
+        ):
+            matching = record
+            break
+
+    now = datetime.now(UTC)
+
+    if matching is None:
+        matching = PersonaIdentity(persona_id=persona.id)
+        session.add(matching)
+
+    if telegram_user_id is not None:
+        matching.telegram_user_id = telegram_user_id
+    if sanitized_username is not None:
+        matching.telegram_username = sanitized_username
+    if sanitized_display_name is not None:
+        matching.display_name = sanitized_display_name
+
+    if not any(
+        (
+            matching.telegram_user_id,
+            matching.telegram_username,
+            matching.display_name,
+        )
+    ):
+        raise ValueError("Identity must contain at least one identifier")
+
+    matching.added_by_user_id = admin_user_id
+    matching.added_in_chat_id = admin_chat_id
+    matching.added_at = now
+
+    if matching.removed_at is not None:
+        matching.removed_at = None
+        matching.removed_by_user_id = None
+        matching.removed_in_chat_id = None
+
+    await session.flush()
+    await session.refresh(matching)
+    return matching
+
+
+async def remove_identity(
+    session: AsyncSession,
+    identity: PersonaIdentity,
+    *,
+    admin_user_id: Optional[int],
+    admin_chat_id: Optional[int],
+) -> PersonaIdentity:
+    if identity.removed_at is None:
+        identity.removed_at = datetime.now(UTC)
+        identity.removed_by_user_id = admin_user_id
+        identity.removed_in_chat_id = admin_chat_id
+        await session.flush()
+        await session.refresh(identity)
+    return identity
+
+
 __all__ = [
     "IdentityDescriptor",
     "IdentityMatchResult",
     "collect_identity_descriptors",
     "describe_identity",
     "evaluate_submission_identity",
+    "list_persona_identities",
+    "get_identity_by_id",
+    "add_identity",
+    "remove_identity",
 ]
