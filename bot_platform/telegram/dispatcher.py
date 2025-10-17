@@ -120,36 +120,6 @@ def contains_explicit_mention(text: str, username: Optional[str]) -> bool:
     return pattern.search(text) is not None
 
 
-def resolve_reply_target(
-    message: Message, *, current_bot_id: Optional[int] = None
-) -> Optional[Message]:
-    """Return message that should receive the bot reply, if different from the request."""
-
-    reply = getattr(message, "reply_to_message", None)
-    if reply is None:
-        return None
-
-    try:
-        original_chat_id = getattr(message.chat, "id", None)
-        reply_chat_id = getattr(reply.chat, "id", None)
-    except AttributeError:
-        return reply
-
-    if original_chat_id is None or reply_chat_id is None:
-        return reply
-
-    if reply_chat_id == original_chat_id:
-        if current_bot_id is not None:
-            reply_author = getattr(reply, "from_user", None)
-            reply_author_id = getattr(reply_author, "id", None)
-            reply_author_is_bot = getattr(reply_author, "is_bot", False)
-            if reply_author_is_bot and reply_author_id == current_bot_id:
-                return None
-        return reply
-
-    return None
-
-
 def _is_expired_callback_query_error(error: TelegramBadRequest) -> bool:
     message = getattr(error, "message", None) or str(error)
     normalized = message.lower()
@@ -2413,61 +2383,20 @@ def build_dispatcher(
 
     async def _reply_with_quote(message: Message, quote: Quote) -> None:
         text_payload = (quote.text_content or "").strip() or "…"
-        bot_id, _ = await _get_bot_identity()
-        reply_target = resolve_reply_target(message, current_bot_id=bot_id)
-
-        reply_kwargs: dict[str, Any] = {}
-        if reply_target is not None and getattr(reply_target, "message_id", None):
-            reply_kwargs = {
-                "reply_to_message_id": reply_target.message_id,
-                "allow_sending_without_reply": True,
-            }
-
         async def _send_text() -> None:
-            await message.answer(text_payload, **reply_kwargs)
+            await message.answer(text_payload)
 
         async def _send_photo() -> None:
             await message.answer_photo(
                 quote.file_id,
                 caption=text_payload if quote.text_content else None,
-                **reply_kwargs,
             )
 
         async def _send_audio() -> None:
             await message.answer_audio(
                 quote.file_id,
                 caption=text_payload if quote.text_content else None,
-                **reply_kwargs,
             )
-        async def _send_text() -> None:
-            if reply_target is not None:
-                await reply_target.reply(text_payload)
-            else:
-                await message.answer(text_payload)
-
-        async def _send_photo() -> None:
-            if reply_target is not None:
-                await reply_target.reply_photo(
-                    quote.file_id,
-                    caption=text_payload if quote.text_content else None,
-                )
-            else:
-                await message.answer_photo(
-                    quote.file_id,
-                    caption=text_payload if quote.text_content else None,
-                )
-
-        async def _send_audio() -> None:
-            if reply_target is not None:
-                await reply_target.reply_audio(
-                    quote.file_id,
-                    caption=text_payload if quote.text_content else None,
-                )
-            else:
-                await message.answer_audio(
-                    quote.file_id,
-                    caption=text_payload if quote.text_content else None,
-                )
 
         try:
             if quote.media_type == MediaType.TEXT or not quote.file_id:
@@ -2479,11 +2408,7 @@ def build_dispatcher(
             else:
                 await _send_text()
         except TelegramBadRequest:
-            await message.answer(text_payload, **reply_kwargs)
-            if reply_target is not None:
-                await reply_target.reply(text_payload)
-            else:
-                await message.answer(text_payload)
+            await message.answer(text_payload)
 
     async def _resolve_language_priority(persona_language: Optional[str], message: Message) -> list[str]:
         priority: list[str] = []
