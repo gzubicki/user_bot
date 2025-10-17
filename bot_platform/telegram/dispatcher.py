@@ -901,9 +901,9 @@ def build_dispatcher(
                 limit=MAX_PENDING_PREVIEW,
                 exclude_ids=exclude_ids,
             )
-        snapshots: list[dict[str, Any]] = []
-        for item in submissions:
-            snapshots.append(await _snapshot_submission(session, item))
+            snapshots: list[dict[str, Any]] = []
+            for item in submissions:
+                snapshots.append(await _snapshot_submission(session, item))
         return snapshots, total_pending
 
     async def _compose_submission_view(
