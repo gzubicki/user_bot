@@ -10,7 +10,7 @@ from typing import Any, Iterable, Optional
 
 from aiogram import Bot, Dispatcher, F, Router
 from aiogram.client.default import DefaultBotProperties
-from aiogram.enums import ParseMode
+from aiogram.enums import MessageEntityType, ParseMode
 from aiogram.exceptions import TelegramBadRequest, TelegramNetworkError, TelegramUnauthorizedError
 from aiogram.filters import Command, CommandStart
 from aiogram.fsm.context import FSMContext
@@ -29,6 +29,74 @@ from .states import AddBotStates, EditBotStates, IdentityStates, ModerationState
 
 
 logger = logging.getLogger(__name__)
+
+
+def normalize_entity_type(entity_type: Any) -> str:
+    """Return a lowercase representation for Telegram message entity types."""
+
+    if isinstance(entity_type, MessageEntityType):
+        return entity_type.value
+    if isinstance(entity_type, str):
+        return entity_type.lower()
+    return str(entity_type).lower()
+
+
+def is_command_addressed_to_bot(command: str, normalized_username: Optional[str]) -> bool:
+    """Check whether a bot command targets the current bot.
+
+    Telegram dostarcza treść komendy jako osobną encję – `command` zawiera
+    wyłącznie fragment od ukośnika do końca komendy (bez parametrów). W grupach
+    użytkownicy mogą wpisywać komendy bez dopisku `@bot`, dlatego traktujemy
+    brak sufiksu jako komendę skierowaną do bieżącego bota. Jeżeli jednak
+    pojawi się sufiks, porównujemy go z nazwą użytkownika bota, by uniknąć
+    reagowania na cudze komendy.
+    """
+
+    normalized = command.strip().lower()
+    if not normalized.startswith("/"):
+        return False
+
+    if "@" not in normalized:
+        return True
+
+    suffix = normalized.split("@", 1)[1]
+    if not suffix:
+        return True
+    if normalized_username is None:
+        return False
+    return suffix == normalized_username
+
+
+def contains_explicit_mention(text: str, username: Optional[str]) -> bool:
+    """Return True if `@username` appears in text as a standalone mention."""
+
+    if not text or not username:
+        return False
+
+    pattern = re.compile(rf"(?<![\w@])@{re.escape(username)}(?![\w@])", re.IGNORECASE)
+    return pattern.search(text) is not None
+
+
+def resolve_reply_target(message: Message) -> Optional[Message]:
+    """Return message that should receive the bot reply, if different from the request."""
+
+    reply = getattr(message, "reply_to_message", None)
+    if reply is None:
+        return None
+
+    try:
+        original_chat_id = getattr(message.chat, "id", None)
+        reply_chat_id = getattr(reply.chat, "id", None)
+    except AttributeError:
+        return reply
+
+    if original_chat_id is None or reply_chat_id is None:
+        return reply
+
+    if reply_chat_id == original_chat_id:
+        return reply
+
+    return None
 
 
 def _is_expired_callback_query_error(error: TelegramBadRequest) -> bool:
@@ -1870,22 +1938,22 @@ def build_dispatcher(
             if not entities or not text:
                 return False
             for entity in entities:
-                snippet = text[entity.offset : entity.offset + entity.length]
-                entity_type = getattr(entity, "type", "")
+                try:
+                    snippet = entity.extract_from(text)
+                except Exception:  # pragma: no cover - defensywny fallback
+                    snippet = text[entity.offset : entity.offset + entity.length]
+                entity_type = normalize_entity_type(getattr(entity, "type", ""))
                 if (
-                    entity_type == "mention"
+                    entity_type.endswith("mention")
                     and normalized_username
                     and snippet.lower() == f"@{normalized_username}"
                 ):
                     return True
-                if entity_type == "text_mention" and getattr(entity, "user", None):
+                if entity_type.endswith("text_mention") and getattr(entity, "user", None):
                     if entity.user.id == bot_id:
                         return True
-                if entity_type == "bot_command":
-                    command = snippet.lower()
-                    if normalized_username and command.endswith(f"@{normalized_username}"):
-                        return True
-                    if chat_type == "private":
+                if entity_type.endswith("bot_command"):
+                    if is_command_addressed_to_bot(snippet, normalized_username):
                         return True
             return False
 
@@ -1899,7 +1967,7 @@ def build_dispatcher(
         if _check_entities(message.caption_entities, message.caption or ""):
             return True
 
-        if normalized_username and f"@{normalized_username}" in content.lower():
+        if contains_explicit_mention(content, username or normalized_username):
             return True
 
         if chat_type == "private":
@@ -1910,17 +1978,43 @@ def build_dispatcher(
 
     async def _reply_with_quote(message: Message, quote: Quote) -> None:
         text_payload = (quote.text_content or "").strip() or "…"
+        reply_target = resolve_reply_target(message)
+
+        reply_kwargs: dict[str, Any] = {}
+        if reply_target is not None and getattr(reply_target, "message_id", None):
+            reply_kwargs = {
+                "reply_to_message_id": reply_target.message_id,
+                "allow_sending_without_reply": True,
+            }
+
+        async def _send_text() -> None:
+            await message.answer(text_payload, **reply_kwargs)
+
+        async def _send_photo() -> None:
+            await message.answer_photo(
+                quote.file_id,
+                caption=text_payload if quote.text_content else None,
+                **reply_kwargs,
+            )
+
+        async def _send_audio() -> None:
+            await message.answer_audio(
+                quote.file_id,
+                caption=text_payload if quote.text_content else None,
+                **reply_kwargs,
+            )
+
         try:
             if quote.media_type == MediaType.TEXT or not quote.file_id:
-                await message.answer(text_payload)
+                await _send_text()
             elif quote.media_type == MediaType.IMAGE:
-                await message.answer_photo(quote.file_id, caption=text_payload if quote.text_content else None)
+                await _send_photo()
             elif quote.media_type == MediaType.AUDIO:
-                await message.answer_audio(quote.file_id, caption=text_payload if quote.text_content else None)
+                await _send_audio()
             else:
-                await message.answer(text_payload)
+                await _send_text()
         except TelegramBadRequest:
-            await message.answer(text_payload)
+            await message.answer(text_payload, **reply_kwargs)
 
     async def _resolve_language_priority(persona_language: Optional[str], message: Message) -> list[str]:
         priority: list[str] = []
