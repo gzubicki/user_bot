@@ -120,7 +120,9 @@ def contains_explicit_mention(text: str, username: Optional[str]) -> bool:
     return pattern.search(text) is not None
 
 
-def resolve_reply_target(message: Message) -> Optional[Message]:
+def resolve_reply_target(
+    message: Message, *, current_bot_id: Optional[int] = None
+) -> Optional[Message]:
     """Return message that should receive the bot reply, if different from the request."""
 
     reply = getattr(message, "reply_to_message", None)
@@ -137,6 +139,12 @@ def resolve_reply_target(message: Message) -> Optional[Message]:
         return reply
 
     if reply_chat_id == original_chat_id:
+        if current_bot_id is not None:
+            reply_author = getattr(reply, "from_user", None)
+            reply_author_id = getattr(reply_author, "id", None)
+            reply_author_is_bot = getattr(reply_author, "is_bot", False)
+            if reply_author_is_bot and reply_author_id == current_bot_id:
+                return None
         return reply
 
     return None
@@ -2405,7 +2413,8 @@ def build_dispatcher(
 
     async def _reply_with_quote(message: Message, quote: Quote) -> None:
         text_payload = (quote.text_content or "").strip() or "…"
-        reply_target = resolve_reply_target(message)
+        bot_id, _ = await _get_bot_identity()
+        reply_target = resolve_reply_target(message, current_bot_id=bot_id)
 
         reply_kwargs: dict[str, Any] = {}
         if reply_target is not None and getattr(reply_target, "message_id", None):
