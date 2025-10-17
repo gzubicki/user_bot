@@ -1803,20 +1803,26 @@ def build_dispatcher(
         ):
             return True
 
+        normalized_username = username.lower() if username else None
+
         def _check_entities(entities: Optional[list], text: str) -> bool:
             if not entities or not text:
                 return False
             for entity in entities:
                 snippet = text[entity.offset : entity.offset + entity.length]
                 entity_type = getattr(entity, "type", "")
-                if entity_type == "mention" and username and snippet.lower() == f"@{username}":
+                if (
+                    entity_type == "mention"
+                    and normalized_username
+                    and snippet.lower() == f"@{normalized_username}"
+                ):
                     return True
                 if entity_type == "text_mention" and getattr(entity, "user", None):
                     if entity.user.id == bot_id:
                         return True
                 if entity_type == "bot_command":
                     command = snippet.lower()
-                    if username and command.endswith(f"@{username}"):
+                    if normalized_username and command.endswith(f"@{normalized_username}"):
                         return True
                     if chat_type == "private":
                         return True
@@ -1827,7 +1833,7 @@ def build_dispatcher(
         if _check_entities(message.caption_entities, message.caption or ""):
             return True
 
-        if username and f"@{username}" in content.lower():
+        if normalized_username and f"@{normalized_username}" in content.lower():
             return True
 
         if chat_type == "private":
