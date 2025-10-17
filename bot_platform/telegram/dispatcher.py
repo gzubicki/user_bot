@@ -2273,6 +2273,17 @@ def build_dispatcher(
             )
         )
 
+    def _extract_user_plain_text(message: Message) -> str:
+        raw_text = (message.text or message.caption or "").strip()
+        if raw_text:
+            return raw_text
+
+        content_type = getattr(message, "content_type", None)
+        if content_type and content_type != "text":
+            return f"<{content_type}>"
+
+        return "<pusta wiadomość>"
+
     def _collect_message_context(message: Message, username: Optional[str]) -> str:
         parts: list[str] = []
         primary_text = message.text or message.caption or ""
@@ -2520,9 +2531,11 @@ def build_dispatcher(
         quoted_name: Optional[str] = None
 
         if not _has_forward_metadata(message):
+            user_text = _extract_user_plain_text(message)
             logger.info(
-                "Pomijamy wiadomość %s – brak metadanych przekazania (nie jest przekierowaniem do bota).",
+                "Pomijamy wiadomość %s – brak metadanych przekazania (nie jest przekierowaniem do bota). Treść użytkownika: %s",
                 _describe_message(message),
+                user_text,
             )
             return
 
