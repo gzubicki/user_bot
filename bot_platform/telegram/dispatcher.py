@@ -1,28 +1,33 @@
 """Aiogram dispatcher factory and admin chat handlers."""
 from __future__ import annotations
 
+import html
 import logging
 import re
-import html
-from datetime import datetime
 from dataclasses import dataclass
+from datetime import datetime
 from typing import Any, Iterable, Optional
 
 from aiogram import Bot, Dispatcher, F, Router
 from aiogram.client.default import DefaultBotProperties
-from aiogram.enums import ParseMode
-from aiogram.exceptions import (
-    SkipHandler,
-    TelegramBadRequest,
-    TelegramNetworkError,
-    TelegramUnauthorizedError,
-)
 from aiogram.enums import MessageEntityType, ParseMode
 from aiogram.exceptions import TelegramBadRequest, TelegramNetworkError, TelegramUnauthorizedError
 from aiogram.filters import Command, CommandStart
 from aiogram.fsm.context import FSMContext
 from aiogram.types import CallbackQuery, InlineKeyboardMarkup, Message
 from aiogram.utils.keyboard import InlineKeyboardBuilder
+
+
+try:  # pragma: no cover - zależne od wersji aiogram
+    from aiogram.exceptions import SkipHandler  # type: ignore[attr-defined]
+except ImportError:  # pragma: no cover - fallback dla innych wersji
+    try:
+        from aiogram.handlers import SkipHandler  # type: ignore[attr-defined]
+    except ImportError:
+        class SkipHandler(Exception):
+            """Zapasowy wyjątek zastępujący SkipHandler z aiogram."""
+
+            pass
 
 from ..config import get_settings
 from ..database import get_session
@@ -1983,8 +1988,11 @@ def build_dispatcher(
                         return True
                 if entity_type.endswith("bot_command"):
                     if is_command_addressed_to_bot(snippet, normalized_username):
+                        return True
                     command = snippet.lower()
-                    if normalized_username and command.endswith(f"@{normalized_username}"):
+                    if normalized_username and command.endswith(
+                        f"@{normalized_username}"
+                    ):
                         return True
                     if chat_type == "private":
                         return True
