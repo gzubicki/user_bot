@@ -17,6 +17,8 @@ from aiogram.exceptions import (
     TelegramNetworkError,
     TelegramUnauthorizedError,
 )
+from aiogram.enums import MessageEntityType, ParseMode
+from aiogram.exceptions import TelegramBadRequest, TelegramNetworkError, TelegramUnauthorizedError
 from aiogram.filters import Command, CommandStart
 from aiogram.fsm.context import FSMContext
 from aiogram.types import CallbackQuery, InlineKeyboardMarkup, Message
@@ -34,6 +36,38 @@ from .states import AddBotStates, EditBotStates, IdentityStates, ModerationState
 
 
 logger = logging.getLogger(__name__)
+
+
+def normalize_entity_type(entity_type: Any) -> str:
+    """Return a lowercase representation for Telegram message entity types."""
+
+    if isinstance(entity_type, MessageEntityType):
+        return entity_type.value
+    if isinstance(entity_type, str):
+        return entity_type.lower()
+    return str(entity_type).lower()
+
+
+def resolve_reply_target(message: Message) -> Optional[Message]:
+    """Return message that should receive the bot reply, if different from the request."""
+
+    reply = getattr(message, "reply_to_message", None)
+    if reply is None:
+        return None
+
+    try:
+        original_chat_id = getattr(message.chat, "id", None)
+        reply_chat_id = getattr(reply.chat, "id", None)
+    except AttributeError:
+        return reply
+
+    if original_chat_id is None or reply_chat_id is None:
+        return reply
+
+    if reply_chat_id == original_chat_id:
+        return reply
+
+    return None
 
 
 def _is_expired_callback_query_error(error: TelegramBadRequest) -> bool:
@@ -1898,17 +1932,17 @@ def build_dispatcher(
                 return False
             for entity in entities:
                 snippet = text[entity.offset : entity.offset + entity.length]
-                entity_type = getattr(entity, "type", "")
+                entity_type = normalize_entity_type(getattr(entity, "type", ""))
                 if (
-                    entity_type == "mention"
+                    entity_type.endswith("mention")
                     and normalized_username
                     and snippet.lower() == f"@{normalized_username}"
                 ):
                     return True
-                if entity_type == "text_mention" and getattr(entity, "user", None):
+                if entity_type.endswith("text_mention") and getattr(entity, "user", None):
                     if entity.user.id == bot_id:
                         return True
-                if entity_type == "bot_command":
+                if entity_type.endswith("bot_command"):
                     command = snippet.lower()
                     if normalized_username and command.endswith(f"@{normalized_username}"):
                         return True
@@ -1941,17 +1975,52 @@ def build_dispatcher(
 
     async def _reply_with_quote(message: Message, quote: Quote) -> None:
         text_payload = (quote.text_content or "").strip() or "…"
-        try:
-            if quote.media_type == MediaType.TEXT or not quote.file_id:
-                await message.answer(text_payload)
-            elif quote.media_type == MediaType.IMAGE:
-                await message.answer_photo(quote.file_id, caption=text_payload if quote.text_content else None)
-            elif quote.media_type == MediaType.AUDIO:
-                await message.answer_audio(quote.file_id, caption=text_payload if quote.text_content else None)
+        reply_target = resolve_reply_target(message)
+
+        async def _send_text() -> None:
+            if reply_target is not None:
+                await reply_target.reply(text_payload)
             else:
                 await message.answer(text_payload)
+
+        async def _send_photo() -> None:
+            if reply_target is not None:
+                await reply_target.reply_photo(
+                    quote.file_id,
+                    caption=text_payload if quote.text_content else None,
+                )
+            else:
+                await message.answer_photo(
+                    quote.file_id,
+                    caption=text_payload if quote.text_content else None,
+                )
+
+        async def _send_audio() -> None:
+            if reply_target is not None:
+                await reply_target.reply_audio(
+                    quote.file_id,
+                    caption=text_payload if quote.text_content else None,
+                )
+            else:
+                await message.answer_audio(
+                    quote.file_id,
+                    caption=text_payload if quote.text_content else None,
+                )
+
+        try:
+            if quote.media_type == MediaType.TEXT or not quote.file_id:
+                await _send_text()
+            elif quote.media_type == MediaType.IMAGE:
+                await _send_photo()
+            elif quote.media_type == MediaType.AUDIO:
+                await _send_audio()
+            else:
+                await _send_text()
         except TelegramBadRequest:
-            await message.answer(text_payload)
+            if reply_target is not None:
+                await reply_target.reply(text_payload)
+            else:
+                await message.answer(text_payload)
 
     async def _resolve_language_priority(persona_language: Optional[str], message: Message) -> list[str]:
         priority: list[str] = []
