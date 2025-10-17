@@ -118,6 +118,14 @@ def build_dispatcher(
 
     current_persona_id = persona_id
     persona_cache: dict[str, Optional[str]] = {"name": None, "language": None}
+
+    def _format_identity_summary(active: int, total: int) -> str:
+        if total <= 0:
+            return "brak tożsamości"
+        inactive = max(total - active, 0)
+        if inactive == 0:
+            return f"{active} aktywnych"
+        return f"{active} aktywnych, {inactive} wyłączonych"
     MAX_PENDING_PREVIEW = 20
 
     async def _ensure_persona_details() -> tuple[Optional[str], Optional[str]]:
@@ -217,9 +225,9 @@ def build_dispatcher(
         intro: Optional[str] = None,
     ) -> None:
         async with get_session() as session:
-            personas = await personas_service.list_personas(session)
+            persona_stats = await personas_service.list_personas_with_identity_stats(session)
 
-        if not personas:
+        if not persona_stats:
             message_text = (
                 "Brak dostępnych person. Dodaj nowego bota lub personę, aby móc zarządzać tożsamościami."
             )
@@ -236,9 +244,13 @@ def build_dispatcher(
         await state.set_state(IdentityStates.choosing_persona)
 
         builder = InlineKeyboardBuilder()
-        for persona in personas:
+        for summary in persona_stats:
+            persona = summary.persona
             label = persona.name or f"ID {persona.id}"
-            builder.button(text=label, callback_data=f"identity:persona:{persona.id}")
+            hint = _format_identity_summary(summary.active_identities, summary.total_identities)
+            builder.button(
+                text=f"{label} · {hint}", callback_data=f"identity:persona:{persona.id}"
+            )
         builder.button(text="⬅️ Menu główne", callback_data="identity:cancel")
         builder.adjust(1)
 
@@ -338,6 +350,9 @@ def build_dispatcher(
         persona_label = html.escape(persona.name or str(persona_id))
         lines.append(
             f"Tożsamości persony <b>{persona_label}</b> (ID: <code>{persona_id}</code>)."
+        )
+        lines.append(
+            f"Powiązane wpisy: {_format_identity_summary(len(active), len(identities))}."
         )
 
         if active:
@@ -687,6 +702,11 @@ def build_dispatcher(
         await state.clear()
         async with get_session() as session:
             bots = await bots_service.list_bots(session)
+            persona_stats = await personas_service.list_personas_with_identity_stats(session)
+
+        stats_by_persona = {
+            summary.persona.id: summary for summary in persona_stats
+        }
 
         if not bots:
             text = "🚫 Brak aktywnych botów. Wybierz „Dodaj bota”, aby rozpocząć."
@@ -697,6 +717,14 @@ def build_dispatcher(
                 lines.append(
                     f"• <b>{bot_entry.display_name}</b> (persona: <i>{persona_name}</i>, ID: <code>{bot_entry.id}</code>)"
                 )
+                if bot_entry.persona_id in stats_by_persona:
+                    summary = stats_by_persona[bot_entry.persona_id]
+                    identity_note = _format_identity_summary(
+                        summary.active_identities, summary.total_identities
+                    )
+                else:
+                    identity_note = "brak tożsamości"
+                lines.append(f"    ↳ Tożsamości: {identity_note}")
             text = "\n".join(lines)
 
         await _safe_callback_answer(callback)
@@ -1210,24 +1238,32 @@ def build_dispatcher(
             await state.update_data(new_display_name=display_name_raw)
 
         async with get_session() as session:
-            personas = await personas_service.list_personas(session)
+            persona_stats = await personas_service.list_personas_with_identity_stats(session)
 
         data = await state.get_data()
         current_persona_id = data.get("current_persona_id")
         current_persona_name = data.get("current_persona_name", "—")
 
-        if personas:
+        if persona_stats:
             await state.update_data(
                 persona_choices=[
-                    {"id": persona.id, "name": persona.name, "language": persona.language}
-                    for persona in personas
+                    {
+                        "id": summary.persona.id,
+                        "name": summary.persona.name,
+                        "language": summary.persona.language,
+                        "active_identities": summary.active_identities,
+                        "total_identities": summary.total_identities,
+                    }
+                    for summary in persona_stats
                 ]
             )
             keyboard_builder = InlineKeyboardBuilder()
-            for persona in personas:
+            for summary in persona_stats:
+                persona = summary.persona
                 prefix = "⭐ " if persona.id == current_persona_id else ""
+                hint = _format_identity_summary(summary.active_identities, summary.total_identities)
                 keyboard_builder.button(
-                    text=f"{prefix}{persona.name} ({persona.language})",
+                    text=f"{prefix}{persona.name} ({persona.language}) · {hint}",
                     callback_data=f"edit_persona:{persona.id}",
                 )
             keyboard_builder.button(text="➕ Nowa persona", callback_data="edit_persona:new")
@@ -1399,19 +1435,27 @@ def build_dispatcher(
         await state.update_data(display_name=display_name)
 
         async with get_session() as session:
-            personas = await personas_service.list_personas(session)
+            persona_stats = await personas_service.list_personas_with_identity_stats(session)
 
-        if personas:
+        if persona_stats:
             await state.update_data(
                 persona_choices=[
-                    {"id": persona.id, "name": persona.name, "language": persona.language}
-                    for persona in personas
+                    {
+                        "id": summary.persona.id,
+                        "name": summary.persona.name,
+                        "language": summary.persona.language,
+                        "active_identities": summary.active_identities,
+                        "total_identities": summary.total_identities,
+                    }
+                    for summary in persona_stats
                 ]
             )
             keyboard_builder = InlineKeyboardBuilder()
-            for persona in personas:
+            for summary in persona_stats:
+                persona = summary.persona
+                hint = _format_identity_summary(summary.active_identities, summary.total_identities)
                 keyboard_builder.button(
-                    text=f"{persona.name} ({persona.language})",
+                    text=f"{persona.name} ({persona.language}) · {hint}",
                     callback_data=f"persona:{persona.id}",
                 )
             keyboard_builder.button(text="➕ Nowa persona", callback_data="persona:new")

@@ -11,6 +11,7 @@ from sqlalchemy.orm import Session as SyncSession
 
 from bot_platform.models import Persona, PersonaIdentity
 from bot_platform.services import identities as identities_service
+from bot_platform.services import personas as personas_service
 
 
 class _AsyncSessionAdapter:
@@ -74,6 +75,8 @@ def test_add_identity_creates_record() -> None:
             await session.flush()
 
             assert identity.id is not None
+            assert identity.persona_id == persona.id
+            assert identity.persona is persona
             assert identity.telegram_user_id == 123456
             assert identity.added_by_user_id == 10
             assert identity.added_in_chat_id == 20
@@ -155,6 +158,55 @@ def test_add_identity_updates_existing_fields() -> None:
             assert updated.id == identity.id
             assert updated.telegram_user_id == 999
             assert updated.added_by_user_id == 2
+
+    asyncio.run(scenario())
+
+
+def test_list_personas_with_identity_stats_counts_active_and_total() -> None:
+    async def scenario() -> None:
+        async with _session_scope() as session:
+            persona_primary = Persona(name="Alpha", language="pl")
+            persona_secondary = Persona(name="Beta", language="en")
+            session.add(persona_primary)
+            session.add(persona_secondary)
+            await session.flush()
+
+            first_identity = await identities_service.add_identity(
+                session,
+                persona_primary,
+                telegram_user_id=111,
+                admin_user_id=1,
+                admin_chat_id=100,
+            )
+            await identities_service.add_identity(
+                session,
+                persona_primary,
+                display_name="Alpha Persona",
+                admin_user_id=2,
+                admin_chat_id=200,
+            )
+            await identities_service.remove_identity(
+                session,
+                first_identity,
+                admin_user_id=3,
+                admin_chat_id=300,
+            )
+
+            await identities_service.add_identity(
+                session,
+                persona_secondary,
+                telegram_username="beta_user",
+                admin_user_id=4,
+                admin_chat_id=400,
+            )
+
+            stats = await personas_service.list_personas_with_identity_stats(session)
+            stats_by_id = {item.persona.id: item for item in stats}
+
+            assert stats_by_id[persona_primary.id].total_identities == 2
+            assert stats_by_id[persona_primary.id].active_identities == 1
+            assert stats_by_id[persona_secondary.id].total_identities == 1
+            assert stats_by_id[persona_secondary.id].active_identities == 1
 
     asyncio.run(scenario())
 
