@@ -10,6 +10,13 @@ from typing import Any, Iterable, Optional
 
 from aiogram import Bot, Dispatcher, F, Router
 from aiogram.client.default import DefaultBotProperties
+from aiogram.enums import ParseMode
+from aiogram.exceptions import (
+    SkipHandler,
+    TelegramBadRequest,
+    TelegramNetworkError,
+    TelegramUnauthorizedError,
+)
 from aiogram.enums import MessageEntityType, ParseMode
 from aiogram.exceptions import TelegramBadRequest, TelegramNetworkError, TelegramUnauthorizedError
 from aiogram.filters import Command, CommandStart
@@ -1896,6 +1903,28 @@ def build_dispatcher(
                 return True
         return False
 
+    def _describe_message(message: Message) -> str:
+        chat = getattr(message, "chat", None)
+        chat_id = getattr(chat, "id", None)
+        chat_type = getattr(chat, "type", None)
+        user = getattr(message, "from_user", None)
+        user_id = getattr(user, "id", None)
+        username = getattr(user, "username", None)
+        full_name = getattr(user, "full_name", None)
+        forward_flag = _has_forward_metadata(message)
+        return (
+            "message_id=%s chat_id=%s chat_type=%s from_id=%s username=%s name=%s forward=%s"
+            % (
+                getattr(message, "message_id", None),
+                chat_id,
+                chat_type,
+                user_id,
+                username,
+                full_name,
+                forward_flag,
+            )
+        )
+
     def _collect_message_context(message: Message, username: Optional[str]) -> str:
         parts: list[str] = []
         primary_text = message.text or message.caption or ""
@@ -1954,10 +1983,18 @@ def build_dispatcher(
                         return True
                 if entity_type.endswith("bot_command"):
                     if is_command_addressed_to_bot(snippet, normalized_username):
+                    command = snippet.lower()
+                    if normalized_username and command.endswith(f"@{normalized_username}"):
+                        return True
+                    if chat_type == "private":
                         return True
             return False
 
         if _has_forward_metadata(message):
+            logger.debug(
+                "Wiadomość %s zawiera metadane przekazania – nie traktujemy jej jako wywołania bota.",
+                _describe_message(message),
+            )
             # Przekazane wiadomości traktujemy jak zgłoszenia do moderacji,
             # niezależnie od ich treści lub oznaczeń w tekście.
             return False
@@ -2003,6 +2040,35 @@ def build_dispatcher(
                 caption=text_payload if quote.text_content else None,
                 **reply_kwargs,
             )
+        async def _send_text() -> None:
+            if reply_target is not None:
+                await reply_target.reply(text_payload)
+            else:
+                await message.answer(text_payload)
+
+        async def _send_photo() -> None:
+            if reply_target is not None:
+                await reply_target.reply_photo(
+                    quote.file_id,
+                    caption=text_payload if quote.text_content else None,
+                )
+            else:
+                await message.answer_photo(
+                    quote.file_id,
+                    caption=text_payload if quote.text_content else None,
+                )
+
+        async def _send_audio() -> None:
+            if reply_target is not None:
+                await reply_target.reply_audio(
+                    quote.file_id,
+                    caption=text_payload if quote.text_content else None,
+                )
+            else:
+                await message.answer_audio(
+                    quote.file_id,
+                    caption=text_payload if quote.text_content else None,
+                )
 
         try:
             if quote.media_type == MediaType.TEXT or not quote.file_id:
@@ -2015,6 +2081,10 @@ def build_dispatcher(
                 await _send_text()
         except TelegramBadRequest:
             await message.answer(text_payload, **reply_kwargs)
+            if reply_target is not None:
+                await reply_target.reply(text_payload)
+            else:
+                await message.answer(text_payload)
 
     async def _resolve_language_priority(persona_language: Optional[str], message: Message) -> list[str]:
         priority: list[str] = []
@@ -2043,8 +2113,14 @@ def build_dispatcher(
         if await _is_message_from_current_bot(message):
             return
 
+        logger.debug("Odebrano potencjalne wywołanie publiczne: %s", _describe_message(message))
+
         if not await _is_direct_invocation(message):
-            return
+            logger.debug(
+                "Wiadomość %s nie została zakwalifikowana jako wywołanie bota – przekazujemy dalej.",
+                _describe_message(message),
+            )
+            raise SkipHandler()
 
         if bot_id is None:
             await message.answer("Ten bot nie jest jeszcze skonfigurowany – brak powiązanej persony.")
@@ -2092,7 +2168,13 @@ def build_dispatcher(
             await message.answer("Nie udało się rozpoznać nadawcy wiadomości.")
             return
 
+        logger.debug("Odebrano wiadomość od użytkownika: %s", _describe_message(message))
+
         if await _is_message_from_current_bot(message):
+            logger.debug(
+                "Pomijamy wiadomość %s, ponieważ pochodzi od bieżącego bota.",
+                _describe_message(message),
+            )
             return
 
         text_content: Optional[str] = None
@@ -2105,6 +2187,10 @@ def build_dispatcher(
             text_content = message.text.strip()
             if not text_content:
                 await message.answer("Wyślij proszę treść cytatu w wiadomości tekstowej.")
+                logger.debug(
+                    "Wiadomość %s została odrzucona – pusta treść tekstowa.",
+                    _describe_message(message),
+                )
                 return
             media_type_enum = MediaType.TEXT
         elif message.photo:
@@ -2126,10 +2212,18 @@ def build_dispatcher(
             await message.answer(
                 "Obecnie przyjmuję tylko tekst, zdjęcia lub nagrania audio. Wyślij cytat w jednym z tych formatów."
             )
+            logger.debug(
+                "Wiadomość %s została odrzucona – nieobsługiwany typ treści.",
+                _describe_message(message),
+            )
             return
 
         if media_type_enum is None:
             await message.answer("Nie udało się rozpoznać typu wiadomości.")
+            logger.debug(
+                "Wiadomość %s została odrzucona – nie rozpoznano typu wiadomości.",
+                _describe_message(message),
+            )
             return
 
         async with get_session() as session:
@@ -2146,6 +2240,12 @@ def build_dispatcher(
             )
             await session.commit()
             submission_snapshot = _snapshot_submission(submission)
+
+        logger.info(
+            "Przekazano wiadomość %s do kolejki moderacyjnej jako zgłoszenie #%s.",
+            _describe_message(message),
+            submission.id,
+        )
 
         await message.answer("Dziękujemy! Twoja propozycja trafiła do kolejki moderacji.")
 
