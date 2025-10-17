@@ -1,6 +1,7 @@
 """Aiogram dispatcher factory and admin chat handlers."""
 from __future__ import annotations
 
+import logging
 import re
 import html
 from datetime import datetime
@@ -25,6 +26,25 @@ from ..services import moderation as moderation_service
 from ..services import personas as personas_service
 from ..services import quotes as quotes_service
 from .states import AddBotStates, EditBotStates, ModerationStates
+
+
+logger = logging.getLogger(__name__)
+
+
+def _is_expired_callback_query_error(error: TelegramBadRequest) -> bool:
+    message = getattr(error, "message", None) or str(error)
+    normalized = message.lower()
+    return "query is too old" in normalized or "query id is invalid" in normalized
+
+
+async def _safe_callback_answer(callback: CallbackQuery, *args: Any, **kwargs: Any) -> None:
+    try:
+        await callback.answer(*args, **kwargs)
+    except TelegramBadRequest as exc:
+        if _is_expired_callback_query_error(exc):
+            logger.debug("Ignoring expired callback query %s: %s", callback.id, exc)
+            return
+        raise
 
 
 @dataclass(slots=True)
@@ -210,7 +230,7 @@ def build_dispatcher(
 
         keyboard = _main_menu_keyboard().as_markup()
         if isinstance(target, CallbackQuery):
-            await target.answer()
+            await _safe_callback_answer(target)
             if target.message:
                 await target.message.answer("\n".join(text_lines), reply_markup=keyboard)
         else:
@@ -249,7 +269,7 @@ def build_dispatcher(
     @admin_router.callback_query(F.data == "menu:refresh_tokens")
     async def handle_refresh_tokens(callback: CallbackQuery, state: FSMContext) -> None:
         await bots_service.refresh_bot_token_cache()
-        await callback.answer("Cache tokenów został odświeżony.", show_alert=False)
+        await _safe_callback_answer(callback, "Cache tokenów został odświeżony.", show_alert=False)
 
     @admin_router.callback_query(F.data == "menu:list_bots")
     async def handle_list_bots(callback: CallbackQuery, state: FSMContext) -> None:
@@ -268,7 +288,7 @@ def build_dispatcher(
                 )
             text = "\n".join(lines)
 
-        await callback.answer()
+        await _safe_callback_answer(callback)
         if callback.message:
             await callback.message.answer(text, reply_markup=_main_menu_keyboard().as_markup())
 
@@ -465,7 +485,7 @@ def build_dispatcher(
     ) -> None:
         message_obj: Optional[Message]
         if isinstance(target, CallbackQuery):
-            await target.answer()
+            await _safe_callback_answer(target)
             message_obj = target.message
         else:
             message_obj = target
@@ -536,13 +556,17 @@ def build_dispatcher(
         try:
             submission_id = int(submission_id_raw)
         except ValueError:
-            await callback.answer("Niepoprawne zgłoszenie.", show_alert=True)
+            await _safe_callback_answer(callback, "Niepoprawne zgłoszenie.", show_alert=True)
             return
 
         async with get_session() as session:
             submission = await moderation_service.get_submission_by_id(session, submission_id)
             if submission is None or submission.status != ModerationStatus.PENDING:
-                await callback.answer("To zgłoszenie zostało już przetworzone.", show_alert=True)
+                await _safe_callback_answer(
+                    callback,
+                    "To zgłoszenie zostało już przetworzone.",
+                    show_alert=True,
+                )
                 await state.update_data(moderation_skipped=[])
                 await _show_next_submission(callback, state, reset_skip=True)
                 return
@@ -558,7 +582,7 @@ def build_dispatcher(
                         field_text = _format_identity_fields(fields)
                         if descriptor_text and field_text:
                             reason += f" Najbliższe dopasowanie: {descriptor_text} ({field_text})."
-                await callback.answer(reason, show_alert=True)
+                await _safe_callback_answer(callback, reason, show_alert=True)
                 return
             moderator_user_id = callback.from_user.id if callback.from_user else None
             moderator_chat_id = callback.message.chat.id if callback.message else None
@@ -573,7 +597,7 @@ def build_dispatcher(
             submitted_chat_id = submission.submitted_chat_id
             await session.commit()
 
-        await callback.answer("Zgłoszenie zatwierdzone.", show_alert=False)
+        await _safe_callback_answer(callback, "Zgłoszenie zatwierdzone.", show_alert=False)
 
         if (
             submitted_chat_id
@@ -597,13 +621,17 @@ def build_dispatcher(
         try:
             submission_id = int(submission_id_raw)
         except ValueError:
-            await callback.answer("Niepoprawne zgłoszenie.", show_alert=True)
+            await _safe_callback_answer(callback, "Niepoprawne zgłoszenie.", show_alert=True)
             return
 
         async with get_session() as session:
             submission = await moderation_service.get_submission_by_id(session, submission_id)
             if submission is None or submission.status != ModerationStatus.PENDING:
-                await callback.answer("To zgłoszenie zostało już przetworzone.", show_alert=True)
+                await _safe_callback_answer(
+                    callback,
+                    "To zgłoszenie zostało już przetworzone.",
+                    show_alert=True,
+                )
                 await state.update_data(moderation_skipped=[])
                 await _show_next_submission(callback, state, reset_skip=True)
                 return
@@ -621,7 +649,7 @@ def build_dispatcher(
             submitted_chat_id = submission.submitted_chat_id
             await session.commit()
 
-        await callback.answer("Zgłoszenie odrzucone.", show_alert=False)
+        await _safe_callback_answer(callback, "Zgłoszenie odrzucone.", show_alert=False)
 
         if (
             submitted_chat_id
@@ -645,14 +673,14 @@ def build_dispatcher(
         try:
             submission_id = int(submission_id_raw)
         except ValueError:
-            await callback.answer("Niepoprawne zgłoszenie.", show_alert=True)
+            await _safe_callback_answer(callback, "Niepoprawne zgłoszenie.", show_alert=True)
             return
 
         data = await state.get_data()
         skipped = set(int(x) for x in data.get("moderation_skipped", []))
         skipped.add(submission_id)
         await state.update_data(moderation_skipped=list(skipped))
-        await callback.answer("Pominięto.")
+        await _safe_callback_answer(callback, "Pominięto.")
         await _show_next_submission(callback, state)
 
     @admin_router.callback_query(F.data == "menu:edit_bot")
@@ -662,7 +690,7 @@ def build_dispatcher(
             bots = await bots_service.list_bots(session)
 
         if not bots:
-            await callback.answer()
+            await _safe_callback_answer(callback)
             if callback.message:
                 await callback.message.answer(
                     "🚫 Brak botów do edycji. Wybierz „Dodaj bota”, aby utworzyć nowy rekord.",
@@ -680,7 +708,7 @@ def build_dispatcher(
         keyboard_builder.adjust(1)
 
         await state.set_state(EditBotStates.choosing_bot)
-        await callback.answer()
+        await _safe_callback_answer(callback)
         if callback.message:
             await callback.message.answer(
                 "Wybierz bota, którego chcesz edytować.",
@@ -695,14 +723,22 @@ def build_dispatcher(
         try:
             bot_id = int(bot_id_raw)
         except ValueError:
-            await callback.answer("Niepoprawny identyfikator bota.", show_alert=True)
+            await _safe_callback_answer(
+                callback,
+                "Niepoprawny identyfikator bota.",
+                show_alert=True,
+            )
             return
 
         async with get_session() as session:
             bot_record = await bots_service.get_bot_by_id(session, bot_id)
 
         if bot_record is None:
-            await callback.answer("Nie znaleziono bota. Odśwież listę i spróbuj ponownie.", show_alert=True)
+            await _safe_callback_answer(
+                callback,
+                "Nie znaleziono bota. Odśwież listę i spróbuj ponownie.",
+                show_alert=True,
+            )
             return
 
         persona_name = bot_record.persona.name if bot_record.persona else "—"
@@ -714,7 +750,7 @@ def build_dispatcher(
             current_persona_name=persona_name,
         )
         await state.set_state(EditBotStates.waiting_token)
-        await callback.answer()
+        await _safe_callback_answer(callback)
         if callback.message:
             await callback.message.answer(
                 "Wybrano bota <b>{name}</b> (ID: <code>{id}</code>).\n"
@@ -813,7 +849,7 @@ def build_dispatcher(
     @admin_router.callback_query(EditBotStates.choosing_persona, F.data == "edit_persona:new")
     async def handle_edit_persona_new(callback: CallbackQuery, state: FSMContext) -> None:
         await state.set_state(EditBotStates.waiting_persona_name)
-        await callback.answer()
+        await _safe_callback_answer(callback)
         if callback.message:
             await callback.message.answer(
                 "Podaj nazwę dla nowej persony. Upewnij się, że nazwa jest unikalna."
@@ -830,14 +866,18 @@ def build_dispatcher(
         try:
             persona_id = int(persona_id_raw)
         except ValueError:
-            await callback.answer("Niepoprawna persona.", show_alert=True)
+            await _safe_callback_answer(callback, "Niepoprawna persona.", show_alert=True)
             return
 
         data = await state.get_data()
         persona_choices = data.get("persona_choices", [])
         persona_info = next((item for item in persona_choices if item["id"] == persona_id), None)
         if persona_info is None:
-            await callback.answer("Nie znaleziono persony. Spróbuj ponownie.", show_alert=True)
+            await _safe_callback_answer(
+                callback,
+                "Nie znaleziono persony. Spróbuj ponownie.",
+                show_alert=True,
+            )
             return
 
         await _finalize_bot_update(
@@ -916,7 +956,7 @@ def build_dispatcher(
     @admin_router.callback_query(F.data == "menu:add_bot")
     async def handle_add_bot(callback: CallbackQuery, state: FSMContext) -> None:
         await state.set_state(AddBotStates.waiting_token)
-        await callback.answer()
+        await _safe_callback_answer(callback)
         if callback.message:
             await callback.message.answer(
                 "Wyślij token bota otrzymany od @BotFather.\n"
@@ -982,7 +1022,7 @@ def build_dispatcher(
     @admin_router.callback_query(AddBotStates.choosing_persona, F.data == "persona:new")
     async def handle_new_persona(callback: CallbackQuery, state: FSMContext) -> None:
         await state.set_state(AddBotStates.waiting_persona_name)
-        await callback.answer()
+        await _safe_callback_answer(callback)
         if callback.message:
             await callback.message.answer(
                 "Podaj nazwę dla nowej persony. Upewnij się, że nazwa jest unikalna."
@@ -999,12 +1039,16 @@ def build_dispatcher(
         try:
             persona_id = int(persona_id_str)
         except ValueError:
-            await callback.answer("Niepoprawna persona.", show_alert=True)
+            await _safe_callback_answer(callback, "Niepoprawna persona.", show_alert=True)
             return
 
         persona_info = next((item for item in persona_choices if item["id"] == persona_id), None)
         if persona_info is None:
-            await callback.answer("Nie znaleziono persony. Spróbuj ponownie.", show_alert=True)
+            await _safe_callback_answer(
+                callback,
+                "Nie znaleziono persony. Spróbuj ponownie.",
+                show_alert=True,
+            )
             return
 
         await _finalize_bot_creation(
@@ -1095,7 +1139,11 @@ def build_dispatcher(
             # brak wymaganych danych – wróć do menu
             await state.clear()
             if isinstance(target, CallbackQuery):
-                await target.answer("Brak wymaganych danych – spróbuj ponownie.", show_alert=True)
+                await _safe_callback_answer(
+                    target,
+                    "Brak wymaganych danych – spróbuj ponownie.",
+                    show_alert=True,
+                )
                 return
             await target.answer("Brak wymaganych danych – zacznij od nowa poleceniem /start.")
             return
@@ -1113,7 +1161,7 @@ def build_dispatcher(
                     f"{exc}. Zaktualizuj limity w .env lub dezaktywuj istniejącego bota."
                 )
                 if isinstance(target, CallbackQuery):
-                    await target.answer(str(exc), show_alert=True)
+                    await _safe_callback_answer(target, str(exc), show_alert=True)
                     if target.message:
                         await target.message.answer(warning)
                 else:
@@ -1143,7 +1191,7 @@ def build_dispatcher(
         summary = "\n".join(summary_lines)
 
         if isinstance(target, CallbackQuery):
-            await target.answer()
+            await _safe_callback_answer(target)
             if target.message:
                 await target.message.answer(summary, reply_markup=_main_menu_keyboard().as_markup())
         else:
@@ -1164,7 +1212,11 @@ def build_dispatcher(
                 "Brak wybranego bota. Wywołaj menu główne i spróbuj jeszcze raz."
             )
             if isinstance(target, CallbackQuery):
-                await target.answer("Brak wybranego bota.", show_alert=True)
+                await _safe_callback_answer(
+                    target,
+                    "Brak wybranego bota.",
+                    show_alert=True,
+                )
                 if target.message:
                     await target.message.answer(message_text, reply_markup=_main_menu_keyboard().as_markup())
             else:
@@ -1186,7 +1238,11 @@ def build_dispatcher(
                     "Nie znaleziono bota w bazie. Możliwe, że został usunięty w międzyczasie."
                 )
                 if isinstance(target, CallbackQuery):
-                    await target.answer("Nie znaleziono bota.", show_alert=True)
+                    await _safe_callback_answer(
+                        target,
+                        "Nie znaleziono bota.",
+                        show_alert=True,
+                    )
                     if target.message:
                         await target.message.answer(
                             message_text, reply_markup=_main_menu_keyboard().as_markup()
@@ -1212,7 +1268,7 @@ def build_dispatcher(
                 )
                 await state.set_state(EditBotStates.waiting_token)
                 if isinstance(target, CallbackQuery):
-                    await target.answer(str(exc), show_alert=True)
+                    await _safe_callback_answer(target, str(exc), show_alert=True)
                     if target.message:
                         await target.message.answer(warning)
                 else:
@@ -1250,7 +1306,7 @@ def build_dispatcher(
         summary = "\n".join(summary_lines)
 
         if isinstance(target, CallbackQuery):
-            await target.answer()
+            await _safe_callback_answer(target)
             if target.message:
                 await target.message.answer(summary, reply_markup=_main_menu_keyboard().as_markup())
         else:
