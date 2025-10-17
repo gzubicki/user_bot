@@ -64,6 +64,7 @@ _MEMBERSHIP_EVENT_CONTENT_TYPES = frozenset(
 )
 
 
+USER_SUBMISSION_MERGE_WINDOW = timedelta(seconds=2)
 QuoteSignature = tuple[int | None, str | None, str]
 
 
@@ -2844,7 +2845,7 @@ def build_dispatcher(
                     persona_id=current_persona_id,
                     submitted_by_user_id=message.from_user.id,
                     submitted_chat_id=message.chat.id,
-                    max_age=_USER_SUBMISSION_MERGE_WINDOW,
+                    max_age=USER_SUBMISSION_MERGE_WINDOW,
                     lock_for_update=True,
                 )
                 if recent_submission is not None:
