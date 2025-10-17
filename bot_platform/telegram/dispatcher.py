@@ -1221,8 +1221,6 @@ def build_dispatcher(
             return False
 
         chat_type = getattr(message.chat, "type", "")
-        if chat_type == "private":
-            return True
 
         bot_id, username = await _get_bot_identity()
 
@@ -1261,6 +1259,10 @@ def build_dispatcher(
 
         if username and f"@{username}" in content.lower():
             return True
+
+        if chat_type == "private":
+            # W prywatnych wiadomościach brak wyraźnej komendy traktujemy jako zgłoszenie cytatu.
+            return False
 
         return False
 
