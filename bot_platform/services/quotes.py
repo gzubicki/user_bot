@@ -2,6 +2,7 @@
 from __future__ import annotations
 
 from collections import Counter
+from dataclasses import dataclass
 from difflib import SequenceMatcher
 import re
 from datetime import datetime
@@ -9,12 +10,22 @@ from typing import Any, Optional, Sequence
 
 from sqlalchemy import func, select
 from sqlalchemy.ext.asyncio import AsyncSession
+from sqlalchemy.orm import selectinload
 
 from ..logging_config import get_logger
 from ..models import MediaType, Persona, Quote, Submission
 
 
 logger = get_logger(__name__)
+
+
+@dataclass(slots=True)
+class PersonaQuoteStats:
+    """Podsumowanie dostępnych cytatów dla persony."""
+
+    persona_id: int
+    total_quotes: int
+    media_counts: dict[MediaType, int]
 
 _WORD_RE = re.compile(r"[\wÀ-ÖØ-öø-ÿ']+", re.UNICODE)
 _WHITESPACE_RE = re.compile(r"\s+", re.UNICODE)
@@ -454,6 +465,55 @@ async def create_quote_from_submission(
     return quote
 
 
+async def aggregate_quote_stats(session: AsyncSession) -> dict[int, PersonaQuoteStats]:
+    """Policz cytaty według persony i rodzaju zasobu."""
+
+    stmt = (
+        select(Quote.persona_id, Quote.media_type, func.count(Quote.id))
+        .group_by(Quote.persona_id, Quote.media_type)
+        .order_by(Quote.persona_id.asc())
+    )
+    result = await session.execute(stmt)
+
+    stats: dict[int, PersonaQuoteStats] = {}
+    for persona_id, raw_media_type, count in result.all():
+        if persona_id is None:
+            continue
+        summary = stats.get(persona_id)
+        if summary is None:
+            summary = PersonaQuoteStats(
+                persona_id=persona_id,
+                total_quotes=0,
+                media_counts={},
+            )
+            stats[persona_id] = summary
+
+        if isinstance(raw_media_type, MediaType):
+            media_type = raw_media_type
+        else:
+            media_type = MediaType(str(raw_media_type))
+
+        summary.media_counts[media_type] = int(count or 0)
+        summary.total_quotes += int(count or 0)
+
+    logger.info("Zebrano statystyki cytatów dla %s person", len(stats))
+    return stats
+
+
+async def list_all_quotes_with_personas(session: AsyncSession) -> list[Quote]:
+    """Zwróć wszystkie cytaty wraz z powiązanymi personami."""
+
+    stmt = (
+        select(Quote)
+        .options(selectinload(Quote.persona))
+        .order_by(Quote.persona_id.asc(), Quote.id.asc())
+    )
+    result = await session.execute(stmt)
+    quotes = list(result.scalars().all())
+    logger.info("Pobrano %s cytatów z przypisanymi personami", len(quotes))
+    return quotes
+
+
 __all__ = [
     "count_quotes",
     "random_quote",
@@ -464,4 +524,6 @@ __all__ = [
     "select_relevant_quote",
     "create_quote_from_submission",
     "find_exact_duplicate",
+    "aggregate_quote_stats",
+    "list_all_quotes_with_personas",
 ]
