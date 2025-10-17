@@ -1811,6 +1811,23 @@ def build_dispatcher(
         cleaned = re.sub(r"/[-_\w]+(?:@[-_\w]+)?", " ", cleaned)
         return " ".join(cleaned.split())
 
+    def _has_forward_metadata(message: Message) -> bool:
+        if getattr(message, "forward_date", None):
+            return True
+
+        forward_related_attributes = (
+            "forward_origin",
+            "forward_from",
+            "forward_from_chat",
+            "forward_sender_name",
+            "forward_signature",
+            "forward_from_message_id",
+        )
+        for attribute in forward_related_attributes:
+            if getattr(message, attribute, None) is not None:
+                return True
+        return False
+
     def _collect_message_context(message: Message, username: Optional[str]) -> str:
         parts: list[str] = []
         primary_text = message.text or message.caption or ""
@@ -1880,8 +1897,12 @@ def build_dispatcher(
         if normalized_username and f"@{normalized_username}" in content.lower():
             return True
 
+        if chat_type == "private" and _has_forward_metadata(message):
+            return True
+
         if chat_type == "private":
-            # W prywatnych wiadomościach brak wyraźnej komendy traktujemy jako zgłoszenie cytatu.
+            # W prywatnych wiadomościach brak wyraźnej komendy traktujemy jako zgłoszenie cytatu,
+            # chyba że wiadomość ma metadane przekazania (obsługiwane powyżej).
             return False
 
         return False
