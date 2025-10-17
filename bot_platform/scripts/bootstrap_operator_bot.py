@@ -18,7 +18,11 @@ from sqlalchemy.dialects.postgresql import insert
 from sqlalchemy.ext.asyncio import AsyncSession
 
 from bot_platform.database import get_session_factory
+from bot_platform.logging_config import get_logger, setup_logging
 from bot_platform.models import Bot, Persona
+
+
+logger = get_logger(__name__)
 
 
 def _hash_token(token: str) -> str:
@@ -30,11 +34,17 @@ def _hash_token(token: str) -> str:
 async def _ensure_persona(session: AsyncSession, persona_name: str, language: str) -> Persona:
     """Zwróć istniejącą personę lub utwórz nową."""
 
+    logger.debug("Sprawdzam, czy persona '%s' istnieje w bazie", persona_name)
     result = await session.execute(select(Persona).where(Persona.name == persona_name))
     persona = result.scalar_one_or_none()
     if persona is not None:
         if not persona.is_active:
             persona.is_active = True
+            logger.info("Aktywowano ponownie istniejącą personę '%s' (ID=%s)", persona.name, persona.id)
+        else:
+            logger.debug(
+                "Persona '%s' (ID=%s) już istnieje i jest aktywna", persona.name, persona.id
+            )
         return persona
 
     persona = Persona(
@@ -46,12 +56,21 @@ async def _ensure_persona(session: AsyncSession, persona_name: str, language: st
     )
     session.add(persona)
     await session.flush()
+    logger.info(
+        "Utworzono nową personę '%s' (ID=%s, język=%s)", persona.name, persona.id, persona.language
+    )
     return persona
 
 
 async def _bootstrap(token: str, display_name: str, persona_name: str, language: str) -> None:
     """Dodaj bota operatorskiego i związaną personę."""
 
+    logger.info(
+        "Rozpoczynam bootstrap bota operatorskiego: display_name=%s, persona=%s, language=%s",
+        display_name,
+        persona_name,
+        language,
+    )
     session_factory = get_session_factory()
     async with session_factory() as session:
         persona = await _ensure_persona(session, persona_name, language)
@@ -76,8 +95,16 @@ async def _bootstrap(token: str, display_name: str, persona_name: str, language:
                 },
             )
         )
+        logger.debug(
+            "Wstawiam lub aktualizuję bota operatorskiego dla persony ID=%s", persona.id
+        )
         await session.execute(stmt)
         await session.commit()
+        logger.info(
+            "Zapisano konfigurację bota operatorskiego '%s' powiązanego z personą '%s'",
+            display_name,
+            persona.name,
+        )
 
 
 def _parse_args() -> argparse.Namespace:
@@ -102,8 +129,11 @@ def _parse_args() -> argparse.Namespace:
 
 
 def main() -> None:
+    setup_logging()
     args = _parse_args()
+    logger.info("Uruchomiono skrypt bootstrapu z parametrami: %s", args)
     asyncio.run(_bootstrap(args.token.strip(), args.display_name, args.persona_name, args.language))
+    logger.info("Zakończono bootstrap bota operatorskiego")
 
 
 if __name__ == "__main__":
