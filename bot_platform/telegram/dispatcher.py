@@ -2405,8 +2405,17 @@ def build_dispatcher(
 
         reply_to_message = getattr(message, "reply_to_message", None)
         if isinstance(reply_to_message, Message):
-            reply_target = reply_to_message
-        else:
+            candidate = reply_to_message
+            should_reply_to_candidate = True
+            from_user = getattr(candidate, "from_user", None)
+            if from_user is not None and from_user.is_bot:
+                bot_id, _ = await _get_bot_identity(message.bot)
+                if from_user.id == bot_id:
+                    should_reply_to_candidate = False
+            if should_reply_to_candidate:
+                reply_target = candidate
+
+        if reply_target is None:
             thread_id = getattr(message, "message_thread_id", None)
             if thread_id is not None:
                 reply_kwargs["message_thread_id"] = thread_id
