@@ -104,6 +104,16 @@ async def create_submission(
     session.add(submission)
     await session.flush()
     await session.refresh(submission)
+
+    if submission.persona_id is not None:
+        persona_stmt = (
+            select(Persona)
+            .options(selectinload(Persona.identities))
+            .where(Persona.id == submission.persona_id)
+        )
+        persona_result = await session.execute(persona_stmt)
+        submission.persona = persona_result.scalars().first()
+
     logger.info(
         "Dodano nowe zgłoszenie ID=%s dla persony ID=%s (media_type=%s)",
         submission.id,

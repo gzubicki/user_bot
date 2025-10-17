@@ -155,7 +155,8 @@ def evaluate_submission_identity(submission: Submission) -> IdentityMatchResult:
     candidate_username = _normalise_username(getattr(submission, "submitted_by_username", None))
     candidate_display_name = _normalise_name(getattr(submission, "submitted_by_name", None))
 
-    descriptors = collect_identity_descriptors(getattr(submission, "persona", None))
+    persona = submission.__dict__.get("persona")
+    descriptors = collect_identity_descriptors(persona)
     partial_matches: list[tuple[IdentityDescriptor, tuple[str, ...]]] = []
 
     logger.debug(
