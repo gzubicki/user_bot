@@ -254,6 +254,7 @@ def _main_menu_keyboard() -> InlineKeyboardBuilder:
     builder = InlineKeyboardBuilder()
     builder.button(text="➕ Dodaj bota", callback_data="menu:add_bot")
     builder.button(text="📋 Lista botów", callback_data="menu:list_bots")
+    builder.button(text="🧾 Lista cytatów", callback_data="menu:list_quotes")
     builder.button(text="✏️ Edytuj bota", callback_data="menu:edit_bot")
     builder.button(text="🆔 Tożsamości", callback_data="menu:identities")
     builder.button(text="🗳 Moderacja", callback_data="menu:moderation")
@@ -319,6 +320,65 @@ def build_dispatcher(
         if inactive == 0:
             return f"{active} aktywnych"
         return f"{active} aktywnych, {inactive} wyłączonych"
+
+    def _format_resource_summary(
+        summary: Optional[quotes_service.PersonaQuoteStats],
+    ) -> tuple[str, int]:
+        if summary is None or summary.total_quotes <= 0:
+            return "brak zasobów", 0
+
+        known_labels = {
+            MediaType.TEXT: "teksty",
+            MediaType.IMAGE: "obrazy",
+            MediaType.AUDIO: "audio",
+        }
+        parts: list[str] = []
+        seen: set[MediaType] = set()
+        for media_type, label in known_labels.items():
+            raw_count = summary.media_counts.get(media_type, 0)
+            count = int(raw_count or 0)
+            if count > 0:
+                parts.append(f"{label}: {count}")
+                seen.add(media_type)
+
+        for media_type, raw_count in summary.media_counts.items():
+            if media_type in seen:
+                continue
+            count = int(raw_count or 0)
+            if count <= 0:
+                continue
+            if isinstance(media_type, MediaType):
+                label = media_type.value
+            else:
+                label = str(media_type)
+            parts.append(f"{label}: {count}")
+
+        return (", ".join(parts) if parts else "brak zasobów", summary.total_quotes)
+
+    def _truncate_preview_text(text: str, limit: int = 160) -> str:
+        normalized = re.sub(r"\s+", " ", text or "").strip()
+        if len(normalized) <= limit:
+            return normalized
+        return normalized[: limit - 1].rstrip() + "…"
+
+    def _format_quote_preview(quote: Quote) -> str:
+        media_type = quote.media_type
+        if not isinstance(media_type, MediaType):
+            try:
+                media_type = MediaType(str(media_type))
+            except ValueError:
+                media_type = MediaType.TEXT
+
+        if media_type == MediaType.TEXT:
+            preview = _truncate_preview_text(quote.text_content or "")
+            if not preview:
+                return "<i>[pusty tekst]</i>"
+            return html.escape(preview)
+        if media_type == MediaType.IMAGE:
+            return "<i>[obraz]</i>"
+        if media_type == MediaType.AUDIO:
+            return "<i>[audio]</i>"
+        return f"<i>[{html.escape(str(media_type))}]</i>"
     MAX_PENDING_PREVIEW = 20
 
     async def _ensure_persona_details() -> tuple[Optional[str], Optional[str]]:
@@ -1084,10 +1144,12 @@ def build_dispatcher(
         async with get_session() as session:
             bots = await bots_service.list_bots(session)
             persona_stats = await personas_service.list_personas_with_identity_stats(session)
+            quote_stats = await quotes_service.aggregate_quote_stats(session)
 
         stats_by_persona = {
             summary.persona.id: summary for summary in persona_stats
         }
+        quote_stats_by_persona = quote_stats
 
         if not bots:
             text = "🚫 Brak aktywnych botów. Wybierz „Dodaj bota”, aby rozpocząć."
@@ -1095,8 +1157,18 @@ def build_dispatcher(
             lines = ["<b>Aktywne boty:</b>"]
             for bot_entry in bots:
                 persona_name = bot_entry.persona.name if bot_entry.persona else "—"
+                resource_note, quote_count = _format_resource_summary(
+                    quote_stats_by_persona.get(bot_entry.persona_id)
+                )
                 lines.append(
-                    f"• <b>{bot_entry.display_name}</b> (persona: <i>{persona_name}</i>, ID: <code>{bot_entry.id}</code>)"
+                    "• <b>{display}</b> (persona: <i>{persona}</i>, ID: <code>{bot_id}</code>, "
+                    "zasoby: {resources}, cytaty: {quotes})".format(
+                        display=bot_entry.display_name,
+                        persona=persona_name,
+                        bot_id=bot_entry.id,
+                        resources=resource_note,
+                        quotes=quote_count,
+                    )
                 )
                 if bot_entry.persona_id in stats_by_persona:
                     summary = stats_by_persona[bot_entry.persona_id]
@@ -1111,6 +1183,81 @@ def build_dispatcher(
         await _safe_callback_answer(callback)
         if callback.message:
             await callback.message.answer(text, reply_markup=_main_menu_keyboard().as_markup())
+
+    @admin_router.callback_query(F.data == "menu:list_quotes")
+    async def handle_list_quotes(callback: CallbackQuery, state: FSMContext) -> None:
+        await state.clear()
+        async with get_session() as session:
+            all_quotes = await quotes_service.list_all_quotes_with_personas(session)
+
+        await _safe_callback_answer(callback)
+        if not callback.message:
+            return
+
+        if not all_quotes:
+            await callback.message.answer(
+                "📭 Brak zapisanych cytatów.",
+                reply_markup=_main_menu_keyboard().as_markup(),
+            )
+            return
+
+        sorted_quotes = sorted(
+            all_quotes,
+            key=lambda quote: (
+                (quote.persona.name.casefold() if quote.persona and quote.persona.name else ""),
+                quote.persona_id or 0,
+                quote.id,
+            ),
+        )
+
+        lines: list[str] = ["<b>Wszystkie cytaty:</b>"]
+        current_persona_key: Optional[tuple[int, str]] = None
+
+        for quote in sorted_quotes:
+            persona_name = quote.persona.name if quote.persona else "— bez persony —"
+            persona_id = quote.persona_id or 0
+            persona_key = (persona_id, persona_name)
+            if persona_key != current_persona_key:
+                if lines and lines[-1]:
+                    lines.append("")
+                elif len(lines) == 1:
+                    lines.append("")
+                lines.append(
+                    f"<b>{html.escape(persona_name)}</b> (ID: <code>{persona_id}</code>)"
+                )
+                current_persona_key = persona_key
+            preview = _format_quote_preview(quote)
+            lines.append(f"• {preview} (ID: <code>{quote.id}</code>)")
+
+        max_message_length = 3800
+        chunks: list[str] = []
+        current_lines: list[str] = []
+        current_length = 0
+
+        for line in lines:
+            addition = len(line)
+            if current_lines:
+                addition += 1
+            if current_lines and current_length + addition > max_message_length:
+                chunks.append("\n".join(current_lines))
+                current_lines = [line]
+                current_length = len(line)
+            else:
+                if current_lines:
+                    current_length += 1
+                current_lines.append(line)
+                current_length += len(line)
+
+        if current_lines:
+            chunks.append("\n".join(current_lines))
+
+        for index, chunk in enumerate(chunks):
+            reply_markup = (
+                _main_menu_keyboard().as_markup()
+                if index == len(chunks) - 1
+                else None
+            )
+            await callback.message.answer(chunk, reply_markup=reply_markup)
 
     async def _snapshot_submission(
         session: AsyncSession, submission: Submission
