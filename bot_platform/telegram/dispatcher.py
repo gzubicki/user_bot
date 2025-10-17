@@ -48,6 +48,15 @@ from .states import AddBotStates, EditBotStates, IdentityStates, ModerationState
 logger = logging.getLogger(__name__)
 
 
+_MEMBERSHIP_EVENT_CONTENT_TYPES = frozenset(
+    {
+        "new_chat_members",
+        "left_chat_member",
+        "chat_member_updated",
+    }
+)
+
+
 def _format_user_link(user_id: Optional[int]) -> str:
     """Zwróć link do profilu Telegramu lub czytelny fallback dla braku ID."""
 
@@ -2414,6 +2423,13 @@ def build_dispatcher(
 
         if _has_forward_metadata(message):
             quoted_user_id, quoted_username, quoted_name = _extract_forwarded_author(message)
+
+        if message.content_type in _MEMBERSHIP_EVENT_CONTENT_TYPES:
+            logger.debug(
+                "Pomijamy wiadomość serwisową %s dotyczącą zmian w członkostwie.",
+                _describe_message(message),
+            )
+            return
 
         if message.text:
             text_content = message.text.strip()
