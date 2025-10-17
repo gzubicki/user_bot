@@ -2384,6 +2384,36 @@ def build_dispatcher(
     async def _reply_with_quote(message: Message, quote: Quote) -> None:
         text_payload = (quote.text_content or "").strip() or "…"
         async def _send_text() -> None:
+            if reply_target is not None:
+                await reply_target.reply(text_payload)
+            else:
+                await message.answer(text_payload, **reply_kwargs)
+
+        async def _send_photo() -> None:
+            if reply_target is not None:
+                await reply_target.reply_photo(
+                    quote.file_id,
+                    caption=text_payload if quote.text_content else None,
+                )
+            else:
+                await message.answer_photo(
+                    quote.file_id,
+                    caption=text_payload if quote.text_content else None,
+                    **reply_kwargs,
+                )
+
+        async def _send_audio() -> None:
+            if reply_target is not None:
+                await reply_target.reply_audio(
+                    quote.file_id,
+                    caption=text_payload if quote.text_content else None,
+                )
+            else:
+                await message.answer_audio(
+                    quote.file_id,
+                    caption=text_payload if quote.text_content else None,
+                    **reply_kwargs,
+                )
             await message.answer(text_payload)
 
         async def _send_photo() -> None:
@@ -2408,7 +2438,7 @@ def build_dispatcher(
             else:
                 await _send_text()
         except TelegramBadRequest:
-            await message.answer(text_payload)
+            await message.answer(text_payload, **reply_kwargs)
 
     async def _resolve_language_priority(persona_language: Optional[str], message: Message) -> list[str]:
         priority: list[str] = []
