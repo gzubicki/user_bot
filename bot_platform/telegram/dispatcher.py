@@ -2308,9 +2308,11 @@ def build_dispatcher(
         return combined
 
     async def _is_direct_invocation(message: Message) -> bool:
+        def _contains_media_payload(msg: Message) -> bool:
+            media_attributes = ("photo", "animation", "video", "video_note")
+            return any(getattr(msg, attribute, None) for attribute in media_attributes)
+
         content = (message.text or message.caption or "").strip()
-        if not content:
-            return False
 
         chat_type = getattr(message.chat, "type", "")
 
@@ -2323,7 +2325,18 @@ def build_dispatcher(
             and reply.from_user.is_bot
             and reply.from_user.id == bot_id
         ):
-            return True
+            if content:
+                return True
+            if _contains_media_payload(message):
+                logger.debug(
+                    "Wiadomość %s jest odpowiedzią z materiałem multimedialnym – traktujemy ją jako wywołanie bota.",
+                    _describe_message(message),
+                )
+                return True
+            return False
+
+        if not content:
+            return False
 
         normalized_username = username.lower() if username else None
 
@@ -2486,7 +2499,7 @@ def build_dispatcher(
     public_router = Router(name=f"public-router-{bot_id or 'default'}")
     public_router.message.filter(lambda message: not _is_admin_chat_id(message.chat.id))
 
-    @public_router.message(F.text | F.caption)
+    @public_router.message(F.text | F.caption | F.photo | F.animation | F.video)
     async def handle_public_invocation(message: Message) -> None:
         if await _is_message_from_current_bot(message):
             return
