@@ -5,8 +5,7 @@ from collections import Counter
 from difflib import SequenceMatcher
 import re
 from datetime import datetime
-from random import choice
-from typing import Any, Iterable, Optional, Sequence
+from typing import Any, Optional, Sequence
 
 from sqlalchemy import func, select
 from sqlalchemy.ext.asyncio import AsyncSession
@@ -54,6 +53,24 @@ def _tokenize(text: str) -> list[str]:
 def _filter_stop_words(tokens: Sequence[str]) -> list[str]:
     meaningful = [token for token in tokens if token not in _STOP_WORDS]
     return meaningful or list(tokens)
+
+
+def _prepare_language_priority(language_priority: Optional[Sequence[str]]) -> list[str]:
+    if not language_priority:
+        return []
+
+    prepared: list[str] = []
+    seen: set[str] = set()
+    for language in language_priority:
+        if not language:
+            continue
+        normalized = language.lower()
+        if "-" in normalized:
+            normalized = normalized.split("-", 1)[0]
+        if normalized not in seen:
+            seen.add(normalized)
+            prepared.append(normalized)
+    return prepared
 
 
 def _normalize_quote_text(text: str) -> str:
@@ -113,14 +130,39 @@ async def count_quotes(session: AsyncSession, persona: Persona) -> int:
     return total
 
 
-async def random_quote(session: AsyncSession, persona: Persona) -> Optional[Quote]:
-    stmt = select(Quote).where(Quote.persona_id == persona.id).order_by(func.random()).limit(1)
+async def random_quote(
+    session: AsyncSession,
+    persona: Persona,
+    *,
+    language_priority: Optional[Sequence[str]] = None,
+) -> Optional[Quote]:
+    prepared_languages = _prepare_language_priority(language_priority)
+
+    stmt = select(Quote).where(Quote.persona_id == persona.id)
+    if prepared_languages:
+        stmt = stmt.where(Quote.language.in_([*prepared_languages, "auto"]))
+    stmt = stmt.order_by(func.random()).limit(1)
     result = await session.execute(stmt)
     quote = result.scalars().first()
     if quote is None:
-        logger.warning("Brak cytatów dla persony ID=%s", persona.id)
+        if prepared_languages:
+            logger.debug(
+                "Brak cytatów dla persony ID=%s spełniających preferencje językowe: %s",
+                persona.id,
+                ", ".join(prepared_languages),
+            )
+        else:
+            logger.warning("Brak cytatów dla persony ID=%s", persona.id)
     else:
-        logger.debug("Wylosowano cytat ID=%s dla persony ID=%s", quote.id, persona.id)
+        if prepared_languages:
+            logger.debug(
+                "Wylosowano cytat ID=%s dla persony ID=%s (preferencje językowe: %s)",
+                quote.id,
+                persona.id,
+                ", ".join(prepared_languages),
+            )
+        else:
+            logger.debug("Wylosowano cytat ID=%s dla persony ID=%s", quote.id, persona.id)
     return quote
 
 
@@ -244,34 +286,6 @@ async def find_quotes_by_language(
     return quotes
 
 
-def choose_best_quote(candidates: Iterable[Quote]) -> Optional[Quote]:
-    candidates = list(candidates)
-    if not candidates:
-        logger.debug("Brak kandydatów do wyboru najlepszego cytatu")
-        return None
-    selected = choice(candidates)
-    logger.debug("Wybrano cytat ID=%s jako najlepszy spośród %s", selected.id, len(candidates))
-    return selected
-
-
-def _prepare_language_priority(language_priority: Optional[Sequence[str]]) -> list[str]:
-    if not language_priority:
-        return []
-
-    prepared: list[str] = []
-    seen: set[str] = set()
-    for language in language_priority:
-        if not language:
-            continue
-        normalized = language.lower()
-        if "-" in normalized:
-            normalized = normalized.split("-", 1)[0]
-        if normalized not in seen:
-            seen.add(normalized)
-            prepared.append(normalized)
-    return prepared
-
-
 async def search_quotes_by_relevance(
     session: AsyncSession,
     persona: Persona,
@@ -346,6 +360,25 @@ async def select_relevant_quote(
     language_priority: Optional[Sequence[str]] = None,
 ) -> Optional[Quote]:
     normalized_query = (query or "").strip()
+    if not normalized_query:
+        random_match = await random_quote(
+            session,
+            persona,
+            language_priority=language_priority,
+        )
+        if random_match is None and language_priority:
+            random_match = await random_quote(
+                session,
+                persona,
+                language_priority=None,
+            )
+        if random_match is not None:
+            logger.info(
+                "Wybrano losowy cytat ID=%s w odpowiedzi na puste zapytanie",
+                random_match.id,
+            )
+            return random_match
+
     candidates = await search_quotes_by_relevance(
         session,
         persona,
@@ -364,15 +397,13 @@ async def select_relevant_quote(
             )
             return selected
 
-        selected = choose_best_quote(candidates)
-        if selected is not None:
-            logger.info(
-                "Wybrano losowy cytat ID=%s w odpowiedzi na puste zapytanie",
-                selected.id,
-            )
-            return selected
-
-    fallback = await random_quote(session, persona)
+    fallback = await random_quote(session, persona, language_priority=language_priority)
+    if fallback is None and language_priority:
+        fallback = await random_quote(
+            session,
+            persona,
+            language_priority=None,
+        )
     if fallback is not None:
         logger.info(
             "Brak dopasowań – zwracam losowy cytat ID=%s dla persony ID=%s",
@@ -429,7 +460,6 @@ __all__ = [
     "get_quote_by_id",
     "delete_quote",
     "find_quotes_by_language",
-    "choose_best_quote",
     "search_quotes_by_relevance",
     "select_relevant_quote",
     "create_quote_from_submission",
