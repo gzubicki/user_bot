@@ -2284,7 +2284,7 @@ def build_dispatcher(
 
         return "<pusta wiadomość>"
 
-    def _collect_message_context(message: Message, username: Optional[str]) -> str:
+    async def _collect_message_context(message: Message, username: Optional[str]) -> str:
         parts: list[str] = []
         primary_text = message.text or message.caption or ""
         cleaned_primary = _strip_bot_mentions(primary_text, username)
@@ -2292,13 +2292,18 @@ def build_dispatcher(
             parts.append(cleaned_primary)
 
         reply = message.reply_to_message
+        include_reply_text = True
         if reply:
+            if reply.from_user is not None and reply.from_user.is_bot:
+                bot_id, _ = await _get_bot_identity(message.bot)
+                if reply.from_user.id == bot_id:
+                    include_reply_text = False
             reply_text = reply.text or reply.caption or ""
-            if reply_text:
+            if include_reply_text and reply_text:
                 parts.append(reply_text)
 
         combined = "\n".join(part for part in parts if part).strip()
-        if not combined and reply:
+        if not combined and reply and include_reply_text:
             combined = (reply.text or reply.caption or "").strip()
         return combined
 
@@ -2499,7 +2504,7 @@ def build_dispatcher(
 
             bot_identity = await _get_bot_identity()
             _, username = bot_identity
-            query = _collect_message_context(message, username)
+            query = await _collect_message_context(message, username)
 
             language_priority = await _resolve_language_priority(persona.language, message)
             quote = await quotes_service.select_relevant_quote(
