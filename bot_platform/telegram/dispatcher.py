@@ -1811,6 +1811,23 @@ def build_dispatcher(
         cleaned = re.sub(r"/[-_\w]+(?:@[-_\w]+)?", " ", cleaned)
         return " ".join(cleaned.split())
 
+    def _has_forward_metadata(message: Message) -> bool:
+        if getattr(message, "forward_date", None):
+            return True
+
+        forward_related_attributes = (
+            "forward_origin",
+            "forward_from",
+            "forward_from_chat",
+            "forward_sender_name",
+            "forward_signature",
+            "forward_from_message_id",
+        )
+        for attribute in forward_related_attributes:
+            if getattr(message, attribute, None) is not None:
+                return True
+        return False
+
     def _collect_message_context(message: Message, username: Optional[str]) -> str:
         parts: list[str] = []
         primary_text = message.text or message.caption or ""
@@ -1870,6 +1887,11 @@ def build_dispatcher(
                         return True
                     if chat_type == "private":
                         return True
+            return False
+
+        if _has_forward_metadata(message):
+            # Przekazane wiadomości traktujemy jak zgłoszenia do moderacji,
+            # niezależnie od ich treści lub oznaczeń w tekście.
             return False
 
         if _check_entities(message.entities, message.text or ""):
