@@ -8,6 +8,8 @@ from dataclasses import dataclass
 from datetime import datetime
 from typing import Any, Iterable, Optional
 
+from sqlalchemy.ext.asyncio import AsyncSession
+
 from aiogram import Bot, Dispatcher, F, Router
 from aiogram.client.default import DefaultBotProperties
 from aiogram.enums import MessageEntityType, ParseMode
@@ -253,6 +255,54 @@ def build_dispatcher(
             else None,
             "available": available,
             "partial": partial,
+        }
+
+    async def _build_duplicate_snapshot(
+        session: AsyncSession, submission: Submission
+    ) -> dict[str, Any]:
+        persona_id = submission.persona_id
+        if persona_id is None:
+            return {"checked": False, "exact": None, "match_type": None}
+
+        try:
+            media_type_enum = (
+                submission.media_type
+                if isinstance(submission.media_type, MediaType)
+                else MediaType(submission.media_type)
+            )
+        except ValueError:
+            media_type_enum = MediaType.TEXT
+
+        duplicate_result = await quotes_service.find_exact_duplicate(
+            session,
+            persona_id=persona_id,
+            media_type=media_type_enum,
+            text_content=submission.text_content,
+            file_id=submission.file_id,
+            file_hash=submission.file_hash,
+        )
+
+        if duplicate_result is None:
+            return {"checked": True, "exact": None, "match_type": None}
+
+        duplicate_quote, match_type = duplicate_result
+        text_preview = (duplicate_quote.text_content or "").strip() or None
+        media_value = (
+            duplicate_quote.media_type.value
+            if isinstance(duplicate_quote.media_type, MediaType)
+            else duplicate_quote.media_type
+        )
+
+        return {
+            "checked": True,
+            "match_type": match_type,
+            "exact": {
+                "id": duplicate_quote.id,
+                "media_type": media_value,
+                "language": duplicate_quote.language,
+                "text_preview": text_preview,
+                "file_id": duplicate_quote.file_id,
+            },
         }
 
     def _format_queue_summary_line(snapshot: dict[str, Any]) -> str:
@@ -814,8 +864,12 @@ def build_dispatcher(
         if callback.message:
             await callback.message.answer(text, reply_markup=_main_menu_keyboard().as_markup())
 
-    def _snapshot_submission(submission: Submission) -> dict[str, Any]:
+    async def _snapshot_submission(
+        session: AsyncSession, submission: Submission
+    ) -> dict[str, Any]:
         persona = submission.__dict__.get("persona")
+
+        duplicate_info = await _build_duplicate_snapshot(session, submission)
 
         return {
             "id": submission.id,
@@ -830,6 +884,7 @@ def build_dispatcher(
             "file_id": submission.file_id,
             "created_at": submission.created_at.isoformat(),
             "identity_check": _build_identity_snapshot(submission),
+            "duplicate_check": duplicate_info,
         }
 
     async def _fetch_pending_snapshots(
@@ -846,7 +901,10 @@ def build_dispatcher(
                 limit=MAX_PENDING_PREVIEW,
                 exclude_ids=exclude_ids,
             )
-        return [_snapshot_submission(item) for item in submissions], total_pending
+        snapshots: list[dict[str, Any]] = []
+        for item in submissions:
+            snapshots.append(await _snapshot_submission(session, item))
+        return snapshots, total_pending
 
     async def _compose_submission_view(
         snapshot: dict[str, Any],
@@ -944,6 +1002,35 @@ def build_dispatcher(
                     lines.append("Zdefiniowane tożsamości:")
                     for descriptor_text in available:
                         lines.append(f"• {html.escape(descriptor_text)}")
+
+        duplicate_info = snapshot.get("duplicate_check") or {}
+        duplicate_entry = duplicate_info.get("exact")
+        match_type = duplicate_info.get("match_type")
+
+        if duplicate_entry:
+            lines.append("")
+            lines.append("⚠️ <b>W bazie znajduje się identyczny cytat.</b>")
+            lines.append(
+                f"ID w bazie: <code>{duplicate_entry['id']}</code> (typ: <code>{html.escape(str(duplicate_entry.get('media_type') or ''))}</code>)"
+            )
+            if match_type == "text":
+                lines.append("Powód: treść zgłoszenia odpowiada zapisanej w bazie.")
+            elif match_type == "file_hash":
+                lines.append("Powód: hash pliku zgadza się z istniejącym cytatem.")
+            elif match_type == "file_id":
+                lines.append("Powód: Telegram zwrócił identyczny identyfikator pliku.")
+
+            preview_text = duplicate_entry.get("text_preview")
+            if preview_text:
+                lines.append("")
+                lines.append(f"<blockquote>{html.escape(preview_text)}</blockquote>")
+            else:
+                duplicate_file = duplicate_entry.get("file_id")
+                if duplicate_file:
+                    lines.append(f"Plik: <code>{html.escape(duplicate_file)}</code>")
+        elif duplicate_info.get("checked") is False:
+            lines.append("")
+            lines.append("ℹ️ Nie udało się zweryfikować duplikatów (brak przypisanej persony).")
 
         text_content = snapshot.get("text_content") or ""
         if text_content.strip():
@@ -2252,7 +2339,7 @@ def build_dispatcher(
                 file_id=file_id,
             )
             await session.commit()
-            submission_snapshot = _snapshot_submission(submission)
+            submission_snapshot = await _snapshot_submission(session, submission)
 
         logger.info(
             "Przekazano wiadomość %s do kolejki moderacyjnej jako zgłoszenie #%s.",
