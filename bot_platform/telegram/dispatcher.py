@@ -1889,6 +1889,11 @@ def build_dispatcher(
                         return True
             return False
 
+        if _has_forward_metadata(message):
+            # Przekazane wiadomości traktujemy jak zgłoszenia do moderacji,
+            # niezależnie od ich treści lub oznaczeń w tekście.
+            return False
+
         if _check_entities(message.entities, message.text or ""):
             return True
         if _check_entities(message.caption_entities, message.caption or ""):
@@ -1897,12 +1902,8 @@ def build_dispatcher(
         if normalized_username and f"@{normalized_username}" in content.lower():
             return True
 
-        if chat_type == "private" and _has_forward_metadata(message):
-            return True
-
         if chat_type == "private":
-            # W prywatnych wiadomościach brak wyraźnej komendy traktujemy jako zgłoszenie cytatu,
-            # chyba że wiadomość ma metadane przekazania (obsługiwane powyżej).
+            # W prywatnych wiadomościach brak wyraźnej komendy traktujemy jako zgłoszenie cytatu.
             return False
 
         return False
