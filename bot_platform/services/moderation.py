@@ -4,14 +4,20 @@ from __future__ import annotations
 from datetime import datetime
 from typing import Iterable, Optional
 
-from sqlalchemy import select, update
+from sqlalchemy import func, select, update
 from sqlalchemy.ext.asyncio import AsyncSession
 from sqlalchemy.orm import selectinload
 
 from ..models import MediaType, ModerationAction, ModerationStatus, Submission
 
 
-async def list_pending_submissions(session: AsyncSession, *, persona_id: Optional[int] = None) -> list[Submission]:
+async def list_pending_submissions(
+    session: AsyncSession,
+    *,
+    persona_id: Optional[int] = None,
+    limit: Optional[int] = None,
+    exclude_ids: Optional[Iterable[int]] = None,
+) -> list[Submission]:
     stmt = (
         select(Submission)
         .options(
@@ -21,7 +27,13 @@ async def list_pending_submissions(session: AsyncSession, *, persona_id: Optiona
     )
     if persona_id is not None:
         stmt = stmt.where(Submission.persona_id == persona_id)
+    if exclude_ids:
+        excluded = [int(value) for value in exclude_ids]
+        if excluded:
+            stmt = stmt.where(~Submission.id.in_(excluded))
     stmt = stmt.order_by(Submission.created_at.asc())
+    if limit is not None:
+        stmt = stmt.limit(limit)
     result = await session.execute(stmt)
     return list(result.scalars().all())
 
@@ -114,10 +126,23 @@ async def bulk_mark_submissions(
     return result.rowcount or 0
 
 
+async def count_pending_submissions(
+    session: AsyncSession, *, persona_id: Optional[int] = None
+) -> int:
+    stmt = select(func.count()).select_from(Submission).where(
+        Submission.status == ModerationStatus.PENDING
+    )
+    if persona_id is not None:
+        stmt = stmt.where(Submission.persona_id == persona_id)
+    result = await session.execute(stmt)
+    return int(result.scalar_one() or 0)
+
+
 __all__ = [
     "create_submission",
     "list_pending_submissions",
     "get_submission_by_id",
     "decide_submission",
     "bulk_mark_submissions",
+    "count_pending_submissions",
 ]

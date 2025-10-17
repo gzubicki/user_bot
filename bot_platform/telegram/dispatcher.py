@@ -97,6 +97,7 @@ def build_dispatcher(
 
     current_persona_id = persona_id
     persona_cache: dict[str, Optional[str]] = {"name": None, "language": None}
+    MAX_PENDING_PREVIEW = 20
 
     async def _ensure_persona_details() -> tuple[Optional[str], Optional[str]]:
         if current_persona_id is None:
@@ -141,6 +142,52 @@ def build_dispatcher(
             "available": available,
             "partial": partial,
         }
+
+    def _format_queue_summary_line(snapshot: dict[str, Any]) -> str:
+        persona_value = snapshot.get("persona_name") or snapshot.get("persona_id") or "—"
+        persona_label = html.escape(str(persona_value))
+        media_type_value = snapshot.get("media_type", MediaType.TEXT.value)
+        try:
+            media_type_enum = MediaType(media_type_value)
+        except ValueError:
+            media_type_enum = MediaType.TEXT
+        created_at_raw = snapshot.get("created_at")
+        created_at_text = "?"
+        if created_at_raw:
+            try:
+                created_at_dt = datetime.fromisoformat(created_at_raw)
+                created_at_text = created_at_dt.strftime("%Y-%m-%d %H:%M")
+            except ValueError:
+                created_at_text = str(created_at_raw)
+        return (
+            f"• #{snapshot.get('id')} – typ: <code>{html.escape(media_type_enum.value)}</code>, "
+            f"persona: <i>{persona_label}</i>, zgłoszono: {created_at_text}"
+        )
+
+    def _compose_queue_summary_message(
+        snapshots: list[dict[str, Any]], total_pending: int
+    ) -> tuple[str, Optional[InlineKeyboardMarkup]]:
+        if total_pending == 0:
+            return (
+                "📭 W kolejce moderacyjnej nie ma żadnych zgłoszeń.",
+                _main_menu_keyboard().as_markup(),
+            )
+
+        lines = [f"📊 W kolejce moderacyjnej czeka {total_pending} zgłoszeń."]
+        if total_pending > MAX_PENDING_PREVIEW:
+            lines.append(
+                f"Prezentuję {MAX_PENDING_PREVIEW} najstarszych wpisów oczekujących na moderację."
+            )
+        else:
+            lines.append("Prezentuję wszystkie oczekujące wpisy.")
+
+        if snapshots:
+            lines.append("")
+            lines.append("📝 Najstarsze zgłoszenia:")
+            for snapshot in snapshots:
+                lines.append(_format_queue_summary_line(snapshot))
+
+        return "\n".join(lines), None
 
     admin_router = Router(name=f"admin-router-{bot_id or 'default'}")
     admin_router.message.filter(lambda message: _is_admin_chat_id(message.chat.id))
@@ -241,15 +288,28 @@ def build_dispatcher(
             "identity_check": _build_identity_snapshot(submission),
         }
 
-    async def _fetch_pending_snapshots() -> list[dict[str, Any]]:
+    async def _fetch_pending_snapshots(
+        *, exclude_ids: Optional[Iterable[int]] = None
+    ) -> tuple[list[dict[str, Any]], int]:
         persona_filter = current_persona_id if current_persona_id is not None else None
         async with get_session() as session:
-            submissions = await moderation_service.list_pending_submissions(
+            total_pending = await moderation_service.count_pending_submissions(
                 session, persona_id=persona_filter
             )
-            return [_snapshot_submission(item) for item in submissions]
+            submissions = await moderation_service.list_pending_submissions(
+                session,
+                persona_id=persona_filter,
+                limit=MAX_PENDING_PREVIEW,
+                exclude_ids=exclude_ids,
+            )
+        return [_snapshot_submission(item) for item in submissions], total_pending
 
-    async def _compose_submission_view(snapshot: dict[str, Any]) -> tuple[str, InlineKeyboardMarkup, MediaType]:
+    async def _compose_submission_view(
+        snapshot: dict[str, Any],
+        *,
+        queue_size: Optional[int] = None,
+        preview_limit: Optional[int] = None,
+    ) -> tuple[str, InlineKeyboardMarkup, MediaType]:
         try:
             created_at_dt = datetime.fromisoformat(snapshot["created_at"])
             created_at_text = created_at_dt.strftime("%Y-%m-%d %H:%M:%S")
@@ -280,6 +340,17 @@ def build_dispatcher(
             f"Typ: <code>{media_type_enum.value}</code>",
             f"Zgłoszono: {created_at_text}",
         ]
+
+        if queue_size is not None:
+            if queue_size == 1:
+                queue_line = "W kolejce: 1 zgłoszenie (łącznie z tym wpisem)."
+            else:
+                queue_line = f"W kolejce: {queue_size} zgłoszeń."
+            lines.append(queue_line)
+            if preview_limit is not None and queue_size > preview_limit:
+                lines.append(
+                    f"Wyświetlam {preview_limit} najstarszych wpisów do moderacji."
+                )
 
         username_value = snapshot.get("submitted_by_username")
         if username_value:
@@ -345,8 +416,16 @@ def build_dispatcher(
 
         return "\n".join(lines), keyboard.as_markup(), media_type_enum
 
-    async def _send_submission_preview(message: Message, snapshot: dict[str, Any]) -> None:
-        text, keyboard_markup, media_type_enum = await _compose_submission_view(snapshot)
+    async def _send_submission_preview(
+        message: Message,
+        snapshot: dict[str, Any],
+        *,
+        queue_size: Optional[int] = None,
+        preview_limit: Optional[int] = None,
+    ) -> None:
+        text, keyboard_markup, media_type_enum = await _compose_submission_view(
+            snapshot, queue_size=queue_size, preview_limit=preview_limit
+        )
         file_id = snapshot.get("file_id")
 
         if file_id:
@@ -382,6 +461,7 @@ def build_dispatcher(
         state: FSMContext,
         *,
         reset_skip: bool = False,
+        announce_queue: bool = False,
     ) -> None:
         message_obj: Optional[Message]
         if isinstance(target, CallbackQuery):
@@ -398,7 +478,23 @@ def build_dispatcher(
         if not reset_skip:
             skipped_ids = set(int(x) for x in data.get("moderation_skipped", []))
 
-        snapshots = await _fetch_pending_snapshots()
+        snapshots, total_pending = await _fetch_pending_snapshots(
+            exclude_ids=skipped_ids if skipped_ids else None
+        )
+
+        if announce_queue:
+            summary_text, summary_markup = _compose_queue_summary_message(
+                snapshots, total_pending
+            )
+            await message_obj.answer(summary_text, reply_markup=summary_markup)
+            if total_pending == 0:
+                await state.update_data(
+                    moderation_current_submission=None,
+                    moderation_current_snapshot=None,
+                    moderation_skipped=[],
+                )
+                return
+
         for snapshot in snapshots:
             if snapshot["id"] in skipped_ids:
                 continue
@@ -408,7 +504,12 @@ def build_dispatcher(
                 moderation_current_snapshot=snapshot,
                 moderation_skipped=list(skipped_ids),
             )
-            await _send_submission_preview(message_obj, snapshot)
+            await _send_submission_preview(
+                message_obj,
+                snapshot,
+                queue_size=total_pending,
+                preview_limit=MAX_PENDING_PREVIEW,
+            )
             return
 
         await state.update_data(
@@ -425,7 +526,9 @@ def build_dispatcher(
     async def handle_moderation_menu(callback: CallbackQuery, state: FSMContext) -> None:
         await state.set_state(ModerationStates.reviewing)
         await state.update_data(moderation_skipped=[])
-        await _show_next_submission(callback, state, reset_skip=True)
+        await _show_next_submission(
+            callback, state, reset_skip=True, announce_queue=True
+        )
 
     @admin_router.callback_query(lambda c: c.data is not None and c.data.startswith("moderation:approve:"))
     async def handle_moderation_approve(callback: CallbackQuery, state: FSMContext) -> None:
