@@ -4,7 +4,7 @@ from __future__ import annotations
 from datetime import datetime
 from typing import Iterable, Optional
 
-from sqlalchemy import func, select, update
+from sqlalchemy import delete, func, select, update
 from sqlalchemy.ext.asyncio import AsyncSession
 from sqlalchemy.orm import selectinload
 
@@ -132,6 +132,18 @@ async def bulk_mark_submissions(
     return result.rowcount or 0
 
 
+async def purge_pending_submissions(
+    session: AsyncSession, *, persona_id: Optional[int] = None
+) -> int:
+    """Remove all pending submissions, optionally limited to a persona."""
+
+    stmt = delete(Submission).where(Submission.status == ModerationStatus.PENDING)
+    if persona_id is not None:
+        stmt = stmt.where(Submission.persona_id == persona_id)
+    result = await session.execute(stmt)
+    return result.rowcount or 0
+
+
 async def count_pending_submissions(
     session: AsyncSession, *, persona_id: Optional[int] = None
 ) -> int:
@@ -150,5 +162,6 @@ __all__ = [
     "get_submission_by_id",
     "decide_submission",
     "bulk_mark_submissions",
+    "purge_pending_submissions",
     "count_pending_submissions",
 ]

@@ -242,6 +242,26 @@ def build_dispatcher(
         await message.answer("Operacja przerwana. Wracam do menu głównego.")
         await _send_menu(message, state)
 
+    @admin_router.message(Command(commands=["clear_queue", "clear-queue", "clear-queque", "panic"]))
+    async def handle_clear_queue(message: Message, state: FSMContext) -> None:
+        async with get_session() as session:
+            removed = await moderation_service.purge_pending_submissions(
+                session, persona_id=current_persona_id
+            )
+            await session.commit()
+
+        await state.clear()
+
+        if removed == 0:
+            response = "📭 Kolejka moderacyjna była już pusta."
+        elif removed == 1:
+            response = "🧹 Usunięto 1 zgłoszenie z kolejki moderacyjnej."
+        else:
+            response = f"🧹 Usunięto {removed} zgłoszeń z kolejki moderacyjnej."
+
+        await message.answer(response)
+        await _send_menu(message, state)
+
     @admin_router.callback_query(F.data == "menu:main")
     async def handle_back_to_menu(callback: CallbackQuery, state: FSMContext) -> None:
         await _send_menu(callback, state, intro="Menu główne")
