@@ -6,7 +6,7 @@ from difflib import SequenceMatcher
 import re
 from datetime import datetime
 from random import choice
-from typing import Iterable, Optional, Sequence
+from typing import Any, Iterable, Optional, Sequence
 
 from sqlalchemy import func, select
 from sqlalchemy.ext.asyncio import AsyncSession
@@ -18,6 +18,7 @@ from ..models import MediaType, Persona, Quote, Submission
 logger = get_logger(__name__)
 
 _WORD_RE = re.compile(r"[\wÀ-ÖØ-öø-ÿ']+", re.UNICODE)
+_WHITESPACE_RE = re.compile(r"\s+", re.UNICODE)
 _STOP_WORDS = {
     "a",
     "ale",
@@ -53,6 +54,17 @@ def _tokenize(text: str) -> list[str]:
 def _filter_stop_words(tokens: Sequence[str]) -> list[str]:
     meaningful = [token for token in tokens if token not in _STOP_WORDS]
     return meaningful or list(tokens)
+
+
+def _normalize_quote_text(text: str) -> str:
+    """Return a lowercase string with collapsed whitespace suitable for comparisons."""
+
+    if not text:
+        return ""
+
+    collapsed = _WHITESPACE_RE.sub(" ", text)
+    normalized = collapsed.strip().casefold()
+    return normalized
 
 
 def _score_tokens(query_tokens: Sequence[str], candidate_tokens: Sequence[str]) -> float:
@@ -110,6 +122,71 @@ async def random_quote(session: AsyncSession, persona: Persona) -> Optional[Quot
     else:
         logger.debug("Wylosowano cytat ID=%s dla persony ID=%s", quote.id, persona.id)
     return quote
+
+
+def _normalized_quote_text_expression() -> Any:
+    text_column = func.coalesce(Quote.text_content, "")
+    trimmed = func.trim(text_column)
+    collapsed = func.regexp_replace(trimmed, r"\s+", " ", "g")
+    lowered = func.lower(collapsed)
+    return lowered
+
+
+async def find_exact_duplicate(
+    session: AsyncSession,
+    *,
+    persona_id: int,
+    media_type: MediaType | str,
+    text_content: Optional[str] = None,
+    file_id: Optional[str] = None,
+    file_hash: Optional[bytes] = None,
+) -> Optional[tuple[Quote, str]]:
+    """Return an existing quote with matching payload and the match origin."""
+
+    media_value = media_type.value if isinstance(media_type, MediaType) else str(media_type)
+
+    async def _fetch_with_conditions(*extra_conditions: Any) -> Optional[Quote]:
+        stmt = (
+            select(Quote)
+            .where(Quote.persona_id == persona_id, Quote.media_type == media_value, *extra_conditions)
+            .limit(1)
+        )
+        result = await session.execute(stmt)
+        return result.scalars().first()
+
+    if file_hash:
+        duplicate = await _fetch_with_conditions(Quote.file_hash == file_hash)
+        if duplicate is not None:
+            logger.debug(
+                "Wykryto duplikat cytatu na podstawie hash pliku (persona_id=%s, quote_id=%s)",
+                persona_id,
+                duplicate.id,
+            )
+            return duplicate, "file_hash"
+
+    if file_id:
+        duplicate = await _fetch_with_conditions(Quote.file_id == file_id)
+        if duplicate is not None:
+            logger.debug(
+                "Wykryto duplikat cytatu na podstawie identyfikatora pliku (persona_id=%s, quote_id=%s)",
+                persona_id,
+                duplicate.id,
+            )
+            return duplicate, "file_id"
+
+    normalized_text = _normalize_quote_text(text_content or "")
+    if normalized_text:
+        normalized_expression = _normalized_quote_text_expression()
+        duplicate = await _fetch_with_conditions(normalized_expression == normalized_text)
+        if duplicate is not None:
+            logger.debug(
+                "Wykryto duplikat cytatu na podstawie treści (persona_id=%s, quote_id=%s)",
+                persona_id,
+                duplicate.id,
+            )
+            return duplicate, "text"
+
+    return None
 
 
 async def find_quotes_by_language(
@@ -309,4 +386,5 @@ __all__ = [
     "search_quotes_by_relevance",
     "select_relevant_quote",
     "create_quote_from_submission",
+    "find_exact_duplicate",
 ]
