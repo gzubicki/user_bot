@@ -64,10 +64,22 @@ class _StubChat:
         self.id = chat_id
 
 
+class _StubUser:
+    def __init__(self, user_id: Optional[int], is_bot: bool):
+        self.id = user_id
+        self.is_bot = is_bot
+
+
 class _StubMessage:
-    def __init__(self, chat_id: int | None, reply_to: Optional["_StubMessage"] = None):
+    def __init__(
+        self,
+        chat_id: int | None,
+        reply_to: Optional["_StubMessage"] = None,
+        from_user: Optional[_StubUser] = None,
+    ):
         self.chat = _StubChat(chat_id)
         self.reply_to_message = reply_to
+        self.from_user = from_user
 
 
 def test_resolve_reply_target_returns_none_without_reply():
@@ -88,3 +100,19 @@ def test_resolve_reply_target_ignores_different_chat():
     message = _StubMessage(chat_id=10, reply_to=original)
 
     assert resolve_reply_target(message) is None
+
+
+def test_resolve_reply_target_skips_current_bot_message():
+    bot_user = _StubUser(user_id=42, is_bot=True)
+    bot_message = _StubMessage(chat_id=10, from_user=bot_user)
+    message = _StubMessage(chat_id=10, reply_to=bot_message)
+
+    assert resolve_reply_target(message, current_bot_id=42) is None
+
+
+def test_resolve_reply_target_keeps_other_bot_message():
+    other_bot = _StubUser(user_id=7, is_bot=True)
+    bot_message = _StubMessage(chat_id=10, from_user=other_bot)
+    message = _StubMessage(chat_id=10, reply_to=bot_message)
+
+    assert resolve_reply_target(message, current_bot_id=42) is bot_message
