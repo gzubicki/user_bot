@@ -19,15 +19,18 @@ from aiogram.utils.keyboard import InlineKeyboardBuilder
 
 
 try:  # pragma: no cover - zależne od wersji aiogram
-    from aiogram.exceptions import SkipHandler  # type: ignore[attr-defined]
+    from aiogram.dispatcher.event.bases import SkipHandler
 except ImportError:  # pragma: no cover - fallback dla innych wersji
     try:
-        from aiogram.handlers import SkipHandler  # type: ignore[attr-defined]
+        from aiogram.exceptions import SkipHandler  # type: ignore[attr-defined]
     except ImportError:
-        class SkipHandler(Exception):
-            """Zapasowy wyjątek zastępujący SkipHandler z aiogram."""
+        try:
+            from aiogram.handlers import SkipHandler  # type: ignore[attr-defined]
+        except ImportError:
+            class SkipHandler(Exception):
+                """Zapasowy wyjątek zastępujący SkipHandler z aiogram."""
 
-            pass
+                pass
 
 from ..config import get_settings
 from ..database import get_session
