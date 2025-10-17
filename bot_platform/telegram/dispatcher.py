@@ -5,7 +5,7 @@ import html
 import logging
 import re
 from dataclasses import dataclass
-from datetime import datetime
+from datetime import datetime, timedelta
 from typing import Any, Iterable, Optional
 
 from sqlalchemy.ext.asyncio import AsyncSession
@@ -56,6 +56,9 @@ _MEMBERSHIP_EVENT_CONTENT_TYPES = frozenset(
         "chat_member_updated",
     }
 )
+
+
+_USER_SUBMISSION_MERGE_WINDOW = timedelta(seconds=2)
 
 
 def _format_user_link(user_id: Optional[int]) -> str:
@@ -118,6 +121,18 @@ def contains_explicit_mention(text: str, username: Optional[str]) -> bool:
 
     pattern = re.compile(rf"(?<![\w@])@{re.escape(username)}(?![\w@])", re.IGNORECASE)
     return pattern.search(text) is not None
+
+
+def _merge_submission_text(existing: Optional[str], incoming: str) -> str:
+    """Append ``incoming`` to ``existing`` using a newline separator."""
+
+    existing_clean = (existing or "").strip()
+    incoming_clean = (incoming or "").strip()
+    if not existing_clean:
+        return incoming_clean
+    if not incoming_clean:
+        return existing_clean
+    return f"{existing_clean}\n{incoming_clean}"
 
 
 def _is_expired_callback_query_error(error: TelegramBadRequest) -> bool:
@@ -2686,15 +2701,42 @@ def build_dispatcher(
         duplicate_notice: Optional[dict[str, Any]] = None
         submission: Optional[Submission] = None
         submission_snapshot: Optional[dict[str, Any]] = None
+        merged_into_existing = False
 
         async with get_session() as session:
+            recent_submission: Optional[Submission] = None
+            target_text = text_content
+
+            if (
+                current_persona_id is not None
+                and media_type_enum == MediaType.TEXT
+                and text_content
+            ):
+                recent_submission = await moderation_service.find_recent_text_submission(
+                    session,
+                    persona_id=current_persona_id,
+                    submitted_by_user_id=message.from_user.id,
+                    submitted_chat_id=message.chat.id,
+                    max_age=_USER_SUBMISSION_MERGE_WINDOW,
+                )
+                if recent_submission is not None:
+                    target_text = _merge_submission_text(
+                        recent_submission.text_content,
+                        text_content,
+                    )
+
+            duplicate_payload = target_text if media_type_enum == MediaType.TEXT else text_content
+            duplicate_file_id = file_id
+            if recent_submission is not None:
+                duplicate_file_id = recent_submission.file_id
+
             if current_persona_id is not None:
                 duplicate_result = await quotes_service.find_exact_duplicate(
                     session,
                     persona_id=current_persona_id,
                     media_type=media_type_enum,
-                    text_content=text_content,
-                    file_id=file_id,
+                    text_content=duplicate_payload,
+                    file_id=duplicate_file_id,
                 )
                 if duplicate_result is not None:
                     duplicate_quote, match_type = duplicate_result
@@ -2717,20 +2759,36 @@ def build_dispatcher(
                     )
 
             if duplicate_notice is None:
-                submission = await moderation_service.create_submission(
-                    session,
-                    persona_id=current_persona_id,
-                    submitted_by_user_id=message.from_user.id,
-                    submitted_chat_id=message.chat.id,
-                    submitted_by_username=submitted_by_username,
-                    submitted_by_name=submitted_by_name,
-                    quoted_user_id=quoted_user_id,
-                    quoted_username=quoted_username,
-                    quoted_name=quoted_name,
-                    media_type=media_type_enum,
-                    text_content=text_content,
-                    file_id=file_id,
-                )
+                if recent_submission is not None:
+                    recent_submission.text_content = target_text
+                    if submitted_by_username:
+                        recent_submission.submitted_by_username = submitted_by_username
+                    if submitted_by_name:
+                        recent_submission.submitted_by_name = submitted_by_name
+                    if quoted_user_id is not None:
+                        recent_submission.quoted_user_id = quoted_user_id
+                    if quoted_username:
+                        recent_submission.quoted_username = quoted_username
+                    if quoted_name:
+                        recent_submission.quoted_name = quoted_name
+                    submission = recent_submission
+                    merged_into_existing = True
+                    await session.flush()
+                else:
+                    submission = await moderation_service.create_submission(
+                        session,
+                        persona_id=current_persona_id,
+                        submitted_by_user_id=message.from_user.id,
+                        submitted_chat_id=message.chat.id,
+                        submitted_by_username=submitted_by_username,
+                        submitted_by_name=submitted_by_name,
+                        quoted_user_id=quoted_user_id,
+                        quoted_username=quoted_username,
+                        quoted_name=quoted_name,
+                        media_type=media_type_enum,
+                        text_content=text_content,
+                        file_id=file_id,
+                    )
                 await session.commit()
                 submission_snapshot = await _snapshot_submission(session, submission)
 
@@ -2775,41 +2833,68 @@ def build_dispatcher(
 
         assert submission is not None and submission_snapshot is not None
 
-        logger.info(
-            "Przekazano wiadomość %s do kolejki moderacyjnej jako zgłoszenie #%s.",
-            _describe_message(message),
-            submission.id,
-        )
-
-        await message.answer("Dziękujemy! Twoja propozycja trafiła do kolejki moderacji.")
+        if merged_into_existing:
+            logger.info(
+                "Zaktualizowano zgłoszenie #%s treścią z wiadomości %s.",
+                submission.id,
+                _describe_message(message),
+            )
+            await message.answer(
+                "Dziękujemy! Zaktualizowaliśmy Twoje poprzednie zgłoszenie – całość trafiła do kolejki moderacji."
+            )
+        else:
+            logger.info(
+                "Przekazano wiadomość %s do kolejki moderacyjnej jako zgłoszenie #%s.",
+                _describe_message(message),
+                submission.id,
+            )
+            await message.answer("Dziękujemy! Twoja propozycja trafiła do kolejki moderacji.")
 
         if admin_chat_id and message.chat.id != admin_chat_id:
             persona_name, _ = await _ensure_persona_details()
-            preview = text_content or ("[obraz]" if media_type_enum == MediaType.IMAGE else "[audio]")
-            summary_lines = [
-                "📥 <b>Nowe zgłoszenie do moderacji</b>",
-                f"ID: <code>{submission.id}</code>",
-                f"Persona: <i>{html.escape(persona_name or str(current_persona_id))}</i>",
-                f"Użytkownik: <code>{message.from_user.id}</code>",
-                f"Czat: <code>{message.chat.id}</code>",
-                f"Typ: <code>{media_type_enum.value}</code>",
-            ]
-            if submitted_by_username:
-                username_clean = submitted_by_username[1:] if submitted_by_username.startswith("@") else submitted_by_username
-                if username_clean:
-                    summary_lines.append(f"Alias: <code>@{html.escape(username_clean)}</code>")
-            if submitted_by_name:
-                summary_lines.append(f"Nazwa: <i>{html.escape(submitted_by_name)}</i>")
-            if preview:
-                summary_lines.append("")
-                summary_lines.append(html.escape(preview[:200]))
             snapshot = submission_snapshot
             if persona_name:
                 snapshot["persona_name"] = persona_name
+
+            media_value = snapshot.get("media_type", media_type_enum.value)
             try:
-                await _notify_submission(message.bot, admin_chat_id, snapshot)
-            except TelegramBadRequest:
-                pass
+                final_media_type = MediaType(media_value)
+            except ValueError:
+                final_media_type = media_type_enum
+
+            final_text = (snapshot.get("text_content") or "").strip()
+            preview = final_text or (
+                "[obraz]" if final_media_type == MediaType.IMAGE else "[audio]" if final_media_type == MediaType.AUDIO else ""
+            )
+
+            if merged_into_existing:
+                admin_lines = [
+                    "✏️ <b>Zaktualizowano zgłoszenie do moderacji</b>",
+                    f"ID: <code>{submission.id}</code>",
+                    f"Persona: <i>{html.escape(persona_name or str(current_persona_id))}</i>",
+                    f"Użytkownik: <code>{message.from_user.id}</code>",
+                    f"Czat: <code>{message.chat.id}</code>",
+                    f"Typ: <code>{final_media_type.value}</code>",
+                ]
+                if submitted_by_username:
+                    username_clean = (
+                        submitted_by_username[1:]
+                        if submitted_by_username.startswith("@")
+                        else submitted_by_username
+                    )
+                    if username_clean:
+                        admin_lines.append(f"Alias: <code>@{html.escape(username_clean)}</code>")
+                if submitted_by_name:
+                    admin_lines.append(f"Nazwa: <i>{html.escape(submitted_by_name)}</i>")
+                if preview:
+                    admin_lines.append("")
+                    admin_lines.append(html.escape(preview[:200]))
+                await message.bot.send_message(admin_chat_id, "\n".join(admin_lines))
+            else:
+                try:
+                    await _notify_submission(message.bot, admin_chat_id, snapshot)
+                except TelegramBadRequest:
+                    pass
 
     dispatcher.include_router(user_router)
 
