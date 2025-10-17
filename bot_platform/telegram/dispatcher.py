@@ -17,7 +17,13 @@ from aiogram.exceptions import TelegramBadRequest, TelegramNetworkError, Telegra
 from aiogram.filters import Command, CommandStart
 from aiogram.filters.command import CommandObject
 from aiogram.fsm.context import FSMContext
-from aiogram.types import CallbackQuery, InlineKeyboardMarkup, Message
+from aiogram.types import (
+    BotCommand,
+    BotCommandScopeChat,
+    CallbackQuery,
+    InlineKeyboardMarkup,
+    Message,
+)
 from aiogram.utils.keyboard import InlineKeyboardBuilder
 
 
@@ -580,6 +586,30 @@ def build_dispatcher(
                 await target.message.answer("\n".join(lines), reply_markup=builder.as_markup())
         else:
             await target.answer("\n".join(lines), reply_markup=builder.as_markup())
+
+    async def _configure_admin_commands() -> None:
+        try:
+            chat_id = int(admin_chat_id)
+        except (TypeError, ValueError):
+            logger.warning(
+                "Nie można ustawić komend – niepoprawny identyfikator czatu administracyjnego: %r",
+                admin_chat_id,
+            )
+            return
+
+        commands = [
+            BotCommand(command="start", description="Rozpocznij pracę z botem"),
+            BotCommand(command="menu", description="Pokaż menu główne"),
+            BotCommand(command="cancel", description="Przerwij bieżącą operację"),
+            BotCommand(command="clear_queue", description="Wyczyść kolejkę moderacji"),
+        ]
+
+        try:
+            await bot.set_my_commands(commands, scope=BotCommandScopeChat(chat_id=chat_id))
+        except TelegramBadRequest as exc:
+            logger.warning("Nie udało się ustawić komend w czacie administracyjnym: %s", exc)
+
+    dispatcher.startup.register(_configure_admin_commands)
 
     admin_router = Router(name=f"admin-router-{bot_id or 'default'}")
     admin_router.message.filter(lambda message: _is_admin_chat_id(message.chat.id))
