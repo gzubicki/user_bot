@@ -255,6 +255,57 @@ def build_dispatcher(
             else None,
             "available": available,
             "partial": partial,
+            "candidate_user_id": result.candidate_user_id,
+            "candidate_username": result.candidate_username,
+            "candidate_display_name": result.candidate_display_name,
+        }
+
+    async def _build_duplicate_snapshot(
+        session: AsyncSession, submission: Submission
+    ) -> dict[str, Any]:
+        persona_id = submission.persona_id
+        if persona_id is None:
+            return {"checked": False, "exact": None, "match_type": None}
+
+        try:
+            media_type_enum = (
+                submission.media_type
+                if isinstance(submission.media_type, MediaType)
+                else MediaType(submission.media_type)
+            )
+        except ValueError:
+            media_type_enum = MediaType.TEXT
+
+        duplicate_result = await quotes_service.find_exact_duplicate(
+            session,
+            persona_id=persona_id,
+            media_type=media_type_enum,
+            text_content=submission.text_content,
+            file_id=submission.file_id,
+            file_hash=submission.file_hash,
+        )
+
+        if duplicate_result is None:
+            return {"checked": True, "exact": None, "match_type": None}
+
+        duplicate_quote, match_type = duplicate_result
+        text_preview = (duplicate_quote.text_content or "").strip() or None
+        media_value = (
+            duplicate_quote.media_type.value
+            if isinstance(duplicate_quote.media_type, MediaType)
+            else duplicate_quote.media_type
+        )
+
+        return {
+            "checked": True,
+            "match_type": match_type,
+            "exact": {
+                "id": duplicate_quote.id,
+                "media_type": media_value,
+                "language": duplicate_quote.language,
+                "text_preview": text_preview,
+                "file_id": duplicate_quote.file_id,
+            },
         }
 
     async def _build_duplicate_snapshot(
@@ -879,6 +930,9 @@ def build_dispatcher(
             "submitted_chat_id": submission.submitted_chat_id,
             "submitted_by_username": submission.submitted_by_username,
             "submitted_by_name": submission.submitted_by_name,
+            "quoted_user_id": submission.quoted_user_id,
+            "quoted_username": submission.quoted_username,
+            "quoted_name": submission.quoted_name,
             "media_type": submission.media_type.value if isinstance(submission.media_type, MediaType) else str(submission.media_type),
             "text_content": submission.text_content or "",
             "file_id": submission.file_id,
@@ -963,6 +1017,20 @@ def build_dispatcher(
         display_name_value = snapshot.get("submitted_by_name")
         if display_name_value:
             lines.append(f"Nazwa: <i>{html.escape(display_name_value)}</i>")
+
+        quoted_user_id = snapshot.get("quoted_user_id")
+        quoted_username = snapshot.get("quoted_username")
+        quoted_name = snapshot.get("quoted_name")
+        if quoted_user_id is not None:
+            lines.append(f"Cytowany użytkownik: <code>{quoted_user_id}</code>")
+        if quoted_username:
+            username_clean = quoted_username[1:] if quoted_username.startswith("@") else quoted_username
+            if username_clean:
+                lines.append(
+                    f"Alias cytowanego: <code>@{html.escape(username_clean)}</code>"
+                )
+        if quoted_name:
+            lines.append(f"Nazwa cytowanego: <i>{html.escape(quoted_name)}</i>")
 
         identity_info = snapshot.get("identity_check") or {}
         identity_matched = identity_info.get("matched")
@@ -2000,6 +2068,46 @@ def build_dispatcher(
                 return True
         return False
 
+    def _extract_forwarded_author(
+        message: Message,
+    ) -> tuple[Optional[int], Optional[str], Optional[str]]:
+        user_id: Optional[int] = None
+        username: Optional[str] = None
+        display_name: Optional[str] = None
+
+        forward_from = getattr(message, "forward_from", None)
+        if forward_from is not None:
+            user_id = getattr(forward_from, "id", None) or user_id
+            username = getattr(forward_from, "username", None) or username
+            display_name = getattr(forward_from, "full_name", None) or display_name
+
+        forward_origin = getattr(message, "forward_origin", None)
+        if forward_origin is not None:
+            sender_user = getattr(forward_origin, "sender_user", None)
+            if sender_user is not None:
+                user_id = getattr(sender_user, "id", None) or user_id
+                username = getattr(sender_user, "username", None) or username
+                full_name = getattr(sender_user, "full_name", None)
+                if full_name:
+                    display_name = full_name
+                else:
+                    first_name = getattr(sender_user, "first_name", None)
+                    last_name = getattr(sender_user, "last_name", None)
+                    combined = " ".join(
+                        part for part in (first_name, last_name) if part
+                    ).strip()
+                    if combined:
+                        display_name = combined
+            sender_name = getattr(forward_origin, "sender_name", None)
+            if sender_name:
+                display_name = display_name or sender_name
+
+        sender_name = getattr(message, "forward_sender_name", None)
+        if sender_name:
+            display_name = display_name or sender_name
+
+        return user_id, username, display_name
+
     def _describe_message(message: Message) -> str:
         chat = getattr(message, "chat", None)
         chat_id = getattr(chat, "id", None)
@@ -2282,6 +2390,12 @@ def build_dispatcher(
         media_type_enum: Optional[MediaType] = None
         submitted_by_username: Optional[str] = message.from_user.username
         submitted_by_name: Optional[str] = message.from_user.full_name
+        quoted_user_id: Optional[int] = None
+        quoted_username: Optional[str] = None
+        quoted_name: Optional[str] = None
+
+        if _has_forward_metadata(message):
+            quoted_user_id, quoted_username, quoted_name = _extract_forwarded_author(message)
 
         if message.text:
             text_content = message.text.strip()

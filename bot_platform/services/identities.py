@@ -151,9 +151,18 @@ def _match_descriptor(
 def evaluate_submission_identity(submission: Submission) -> IdentityMatchResult:
     """Compare submission author metadata with persona identity records."""
 
-    candidate_user_id = getattr(submission, "submitted_by_user_id", None)
-    candidate_username = _normalise_username(getattr(submission, "submitted_by_username", None))
-    candidate_display_name = _normalise_name(getattr(submission, "submitted_by_name", None))
+    quoted_user_id = getattr(submission, "quoted_user_id", None)
+    quoted_username = getattr(submission, "quoted_username", None)
+    quoted_name = getattr(submission, "quoted_name", None)
+
+    if quoted_user_id is not None or quoted_username or quoted_name:
+        candidate_user_id = quoted_user_id
+        candidate_username = _normalise_username(quoted_username)
+        candidate_display_name = _normalise_name(quoted_name)
+    else:
+        candidate_user_id = getattr(submission, "submitted_by_user_id", None)
+        candidate_username = _normalise_username(getattr(submission, "submitted_by_username", None))
+        candidate_display_name = _normalise_name(getattr(submission, "submitted_by_name", None))
 
     persona = submission.__dict__.get("persona")
     descriptors = collect_identity_descriptors(persona)
