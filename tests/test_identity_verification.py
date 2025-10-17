@@ -96,3 +96,23 @@ def test_describe_identity_includes_all_fields() -> None:
     assert "ID 555" in descriptor_text
     assert "@alias" in descriptor_text
     assert "Persona Testowa" in descriptor_text
+
+
+def test_identity_uses_quoted_author_metadata() -> None:
+    persona, _ = _build_persona_with_identity(telegram_user_id=999)
+    submission = _build_submission(
+        persona,
+        submitted_by_user_id=123,
+        submitted_by_username="forwarder",
+        quoted_user_id=999,
+        quoted_username="OriginalUser",
+        quoted_name="Jan Cytowany",
+    )
+
+    result = evaluate_submission_identity(submission)
+
+    assert result.matched is True
+    assert set(result.matched_fields) == {"id"}
+    assert result.candidate_user_id == 999
+    assert result.candidate_username == "originaluser"
+    assert result.candidate_display_name == "jan cytowany"
