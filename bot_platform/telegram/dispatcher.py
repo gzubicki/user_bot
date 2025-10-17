@@ -15,6 +15,7 @@ from aiogram.client.default import DefaultBotProperties
 from aiogram.enums import MessageEntityType, ParseMode
 from aiogram.exceptions import TelegramBadRequest, TelegramNetworkError, TelegramUnauthorizedError
 from aiogram.filters import Command, CommandStart
+from aiogram.filters.command import CommandObject
 from aiogram.fsm.context import FSMContext
 from aiogram.types import CallbackQuery, InlineKeyboardMarkup, Message
 from aiogram.utils.keyboard import InlineKeyboardBuilder
@@ -897,6 +898,64 @@ def build_dispatcher(
         await message.answer(response)
         await _send_menu(message, state)
 
+    @admin_router.message(Command("del"))
+    async def handle_delete_quote(message: Message, command: CommandObject) -> None:
+        if current_persona_id is None:
+            await message.answer(
+                "Ten bot nie ma przypisanej persony – nie mogę usuwać cytatów."
+            )
+            return
+
+        argument_text = (command.args or "").strip() if command else ""
+        if not argument_text:
+            await message.answer("Podaj numer cytatu do usunięcia, np. /del 123.")
+            return
+
+        candidate = argument_text.split()[0]
+        try:
+            quote_id = int(candidate)
+        except ValueError:
+            await message.answer("ID cytatu musi być liczbą, np. /del 123.")
+            return
+
+        async with get_session() as session:
+            quote = await quotes_service.get_quote_by_id(session, quote_id)
+            if quote is None:
+                await message.answer(f"Nie znaleziono cytatu o ID {quote_id}.")
+                return
+
+            if quote.persona_id != current_persona_id:
+                await message.answer(
+                    "Nie mogę usunąć tego cytatu – należy do innej persony."
+                )
+                return
+
+            media_value = (
+                quote.media_type.value
+                if isinstance(quote.media_type, MediaType)
+                else str(quote.media_type)
+            )
+            text_preview = (quote.text_content or "").strip()
+            file_id = quote.file_id or ""
+
+            await quotes_service.delete_quote(
+                session,
+                quote,
+                removed_by_user_id=message.from_user.id if message.from_user else None,
+                removed_in_chat_id=message.chat.id,
+            )
+            await session.commit()
+
+        lines = [f"🗑 Usunięto cytat #{quote_id}."]
+        lines.append(f"Typ: <code>{html.escape(media_value)}</code>.")
+        if file_id:
+            lines.append(f"Plik: <code>{html.escape(file_id)}</code>")
+        if text_preview:
+            lines.append("")
+            lines.append(f"<blockquote>{html.escape(text_preview[:200])}</blockquote>")
+
+        await message.answer("\n".join(lines))
+
     @admin_router.callback_query(F.data == "menu:main")
     async def handle_back_to_menu(callback: CallbackQuery, state: FSMContext) -> None:
         await _send_menu(callback, state, intro="Menu główne")
@@ -1166,6 +1225,60 @@ def build_dispatcher(
 
         await message.answer(text, reply_markup=keyboard_markup)
 
+    async def _announce_created_quote(
+        bot_instance: Bot, chat_id: int, quote_snapshot: dict[str, Any]
+    ) -> None:
+        quote_id = quote_snapshot["id"]
+        raw_media = quote_snapshot.get("media_type", MediaType.TEXT)
+        try:
+            media_type = (
+                raw_media
+                if isinstance(raw_media, MediaType)
+                else MediaType(str(raw_media))
+            )
+        except ValueError:
+            media_type = MediaType.TEXT
+
+        text_content = (quote_snapshot.get("text_content") or "").strip()
+        file_id = quote_snapshot.get("file_id") or None
+        header = f"🆕 Cytat #{quote_id}"
+
+        async def _send_text_summary(extra_notice: Optional[str] = None) -> None:
+            lines = [header]
+            if extra_notice:
+                lines.append(extra_notice)
+            if text_content:
+                lines.append("")
+                lines.append(f"<blockquote>{html.escape(text_content)}</blockquote>")
+            await bot_instance.send_message(chat_id, "\n".join(lines))
+
+        if media_type == MediaType.TEXT or not file_id:
+            notice = None if text_content else "Brak treści tekstowej."
+            await _send_text_summary(notice)
+            return
+
+        caption_lines = [header]
+        if text_content:
+            caption_lines.append("")
+            caption_lines.append(text_content)
+        caption = "\n".join(caption_lines)
+
+        try:
+            if media_type == MediaType.IMAGE:
+                await bot_instance.send_photo(chat_id, file_id, caption=caption)
+                return
+            if media_type == MediaType.AUDIO:
+                await bot_instance.send_audio(chat_id, file_id, caption=caption)
+                return
+        except TelegramBadRequest:
+            notice = "Nie udało się przesłać pliku cytatu."
+            if file_id:
+                notice += f" ID pliku: <code>{html.escape(file_id)}</code>"
+            await _send_text_summary(notice)
+            return
+
+        await _send_text_summary(None if text_content else "Brak treści tekstowej.")
+
     async def _notify_submission(message_bot: Bot, chat_id: int, snapshot: dict[str, Any]) -> None:
         text, keyboard_markup, media_type_enum = await _compose_submission_view(snapshot)
         file_id = snapshot.get("file_id")
@@ -1265,6 +1378,7 @@ def build_dispatcher(
             await _safe_callback_answer(callback, "Niepoprawne zgłoszenie.", show_alert=True)
             return
 
+        created_quote_snapshot: Optional[dict[str, Any]] = None
         async with get_session() as session:
             submission = await moderation_service.get_submission_by_id(session, submission_id)
             if submission is None or submission.status != ModerationStatus.PENDING:
@@ -1299,7 +1413,19 @@ def build_dispatcher(
                 moderator_chat_id=moderator_chat_id,
                 action=ModerationStatus.APPROVED,
             )
-            await quotes_service.create_quote_from_submission(session, submission)
+            quote = await quotes_service.create_quote_from_submission(session, submission)
+            media_value = quote.media_type
+            if not isinstance(media_value, MediaType):
+                try:
+                    media_value = MediaType(str(media_value))
+                except ValueError:
+                    media_value = MediaType.TEXT
+            created_quote_snapshot = {
+                "id": quote.id,
+                "media_type": media_value,
+                "text_content": quote.text_content,
+                "file_id": quote.file_id,
+            }
             submitted_chat_id = submission.submitted_chat_id
             await session.commit()
 
@@ -1320,6 +1446,11 @@ def build_dispatcher(
 
         await state.update_data(moderation_skipped=[])
         await _show_next_submission(callback, state, reset_skip=True)
+
+        if callback.message and created_quote_snapshot:
+            await _announce_created_quote(
+                callback.message.bot, callback.message.chat.id, created_quote_snapshot
+            )
 
     @admin_router.callback_query(lambda c: c.data is not None and c.data.startswith("moderation:reject:"))
     async def handle_moderation_reject(callback: CallbackQuery, state: FSMContext) -> None:
