@@ -8,7 +8,11 @@ from sqlalchemy import select
 from sqlalchemy.ext.asyncio import AsyncSession
 
 from ..config import get_settings
+from ..logging_config import get_logger
 from ..models import Bot, BotChatSubscription, SubscriptionLedger, SubscriptionPlan
+
+
+logger = get_logger(__name__)
 
 
 def _plan_duration(plan: SubscriptionPlan) -> Optional[timedelta]:
@@ -51,6 +55,12 @@ async def ensure_chat_subscription(
             granted_in_chat_id=granted_in_chat_id,
         )
         session.add(subscription)
+        logger.info(
+            "Aktywowano nową subskrypcję czatu %s dla bota ID=%s w planie %s",
+            chat_id,
+            bot.id,
+            plan.value,
+        )
     else:
         subscription.plan = plan
         subscription.started_at = datetime.utcnow()
@@ -58,6 +68,12 @@ async def ensure_chat_subscription(
         subscription.is_active = True
         subscription.granted_by_user_id = granted_by_user_id
         subscription.granted_in_chat_id = granted_in_chat_id
+        logger.info(
+            "Odnowiono subskrypcję czatu %s dla bota ID=%s (plan=%s)",
+            chat_id,
+            bot.id,
+            plan.value,
+        )
 
     ledger_entry = SubscriptionLedger(
         bot_id=bot.id,
@@ -68,6 +84,9 @@ async def ensure_chat_subscription(
     )
     session.add(ledger_entry)
     await session.flush()
+    logger.debug(
+        "Dodano wpis w dzienniku subskrypcji dla bota ID=%s, czatu %s", bot.id, chat_id
+    )
     return subscription
 
 
@@ -75,6 +94,9 @@ async def deactivate_subscription(session: AsyncSession, subscription: BotChatSu
     subscription.is_active = False
     subscription.expires_at = datetime.utcnow()
     await session.flush()
+    logger.info(
+        "Dezaktywowano subskrypcję ID=%s dla czatu %s", subscription.id, subscription.chat_id
+    )
     return subscription
 
 
@@ -84,7 +106,11 @@ async def list_active_subscriptions(session: AsyncSession, bot: Bot) -> list[Bot
         BotChatSubscription.is_active.is_(True),
     )
     result = await session.execute(stmt)
-    return list(result.scalars().all())
+    subscriptions = list(result.scalars().all())
+    logger.debug(
+        "Bot ID=%s ma %s aktywnych subskrypcji", bot.id, len(subscriptions)
+    )
+    return subscriptions
 
 
 __all__ = [

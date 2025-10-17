@@ -8,6 +8,7 @@ from sqlalchemy import delete, func, select, update
 from sqlalchemy.ext.asyncio import AsyncSession
 from sqlalchemy.orm import selectinload
 
+from ..logging_config import get_logger
 from ..models import (
     MediaType,
     ModerationAction,
@@ -15,6 +16,9 @@ from ..models import (
     Persona,
     Submission,
 )
+
+
+logger = get_logger(__name__)
 
 
 async def list_pending_submissions(
@@ -41,7 +45,14 @@ async def list_pending_submissions(
     if limit is not None:
         stmt = stmt.limit(limit)
     result = await session.execute(stmt)
-    return list(result.scalars().all())
+    submissions = list(result.scalars().all())
+    logger.info(
+        "Pobrano %s zgłoszeń oczekujących na moderację (persona_id=%s, limit=%s)",
+        len(submissions),
+        persona_id,
+        limit,
+    )
+    return submissions
 
 
 async def get_submission_by_id(session: AsyncSession, submission_id: int) -> Optional[Submission]:
@@ -53,7 +64,16 @@ async def get_submission_by_id(session: AsyncSession, submission_id: int) -> Opt
         .where(Submission.id == submission_id)
     )
     result = await session.execute(stmt)
-    return result.scalars().first()
+    submission = result.scalars().first()
+    if submission is None:
+        logger.warning("Nie znaleziono zgłoszenia o ID=%s", submission_id)
+    else:
+        logger.debug(
+            "Odczytano zgłoszenie ID=%s w statusie %s",
+            submission.id,
+            submission.status,
+        )
+    return submission
 
 
 async def create_submission(
@@ -84,6 +104,12 @@ async def create_submission(
     session.add(submission)
     await session.flush()
     await session.refresh(submission)
+    logger.info(
+        "Dodano nowe zgłoszenie ID=%s dla persony ID=%s (media_type=%s)",
+        submission.id,
+        submission.persona_id,
+        submission.media_type,
+    )
     return submission
 
 
@@ -114,6 +140,9 @@ async def decide_submission(
     )
     session.add(moderation_action)
     await session.flush()
+    logger.info(
+        "Zaktualizowano status zgłoszenia ID=%s na %s", submission.id, submission.status
+    )
     return submission
 
 
@@ -129,7 +158,11 @@ async def bulk_mark_submissions(
         .values(status=status, decided_at=datetime.utcnow())
     )
     result = await session.execute(stmt)
-    return result.rowcount or 0
+    affected = result.rowcount or 0
+    logger.info(
+        "Masowo zaktualizowano %s zgłoszeń na status %s", affected, status
+    )
+    return affected
 
 
 async def purge_pending_submissions(
@@ -141,7 +174,11 @@ async def purge_pending_submissions(
     if persona_id is not None:
         stmt = stmt.where(Submission.persona_id == persona_id)
     result = await session.execute(stmt)
-    return result.rowcount or 0
+    removed = result.rowcount or 0
+    logger.warning(
+        "Usunięto %s oczekujących zgłoszeń (persona_id=%s)", removed, persona_id
+    )
+    return removed
 
 
 async def count_pending_submissions(
@@ -153,7 +190,11 @@ async def count_pending_submissions(
     if persona_id is not None:
         stmt = stmt.where(Submission.persona_id == persona_id)
     result = await session.execute(stmt)
-    return int(result.scalar_one() or 0)
+    total = int(result.scalar_one() or 0)
+    logger.debug(
+        "W kolejce oczekuje %s zgłoszeń (persona_id=%s)", total, persona_id
+    )
+    return total
 
 
 __all__ = [
