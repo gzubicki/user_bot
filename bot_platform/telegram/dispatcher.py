@@ -2718,6 +2718,7 @@ def build_dispatcher(
                     submitted_by_user_id=message.from_user.id,
                     submitted_chat_id=message.chat.id,
                     max_age=_USER_SUBMISSION_MERGE_WINDOW,
+                    lock_for_update=True,
                 )
                 if recent_submission is not None:
                     target_text = _merge_submission_text(

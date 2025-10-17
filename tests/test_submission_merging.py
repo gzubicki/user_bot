@@ -189,3 +189,41 @@ def test_find_recent_text_submission_ignores_non_text() -> None:
             assert found is None
 
     asyncio.run(scenario())
+
+
+def test_find_recent_text_submission_can_lock_row() -> None:
+    class _RecorderSession:
+        def __init__(self) -> None:
+            self.statement = None
+
+        async def execute(self, statement):  # type: ignore[no-untyped-def]
+            self.statement = statement
+
+            class _ScalarResult:
+                @staticmethod
+                def first():  # type: ignore[no-untyped-def]
+                    return None
+
+            class _Result:
+                @staticmethod
+                def scalars():  # type: ignore[no-untyped-def]
+                    return _ScalarResult()
+
+            return _Result()
+
+    async def scenario() -> None:
+        session = _RecorderSession()
+        found = await moderation_service.find_recent_text_submission(
+            session,
+            persona_id=1,
+            submitted_by_user_id=2,
+            submitted_chat_id=3,
+            max_age=timedelta(seconds=5),
+            lock_for_update=True,
+        )
+
+        assert found is None
+        assert session.statement is not None
+        assert getattr(session.statement, "_for_update_arg", None) is not None
+
+    asyncio.run(scenario())

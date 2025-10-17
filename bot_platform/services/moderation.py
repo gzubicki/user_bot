@@ -136,8 +136,14 @@ async def find_recent_text_submission(
     submitted_by_user_id: int,
     submitted_chat_id: int,
     max_age: timedelta,
+    lock_for_update: bool = False,
 ) -> Optional[Submission]:
-    """Return the newest pending text submission within the provided timeframe."""
+    """Return the newest pending text submission within the provided timeframe.
+
+    Gdy ``lock_for_update`` ustawione jest na ``True``, zapytanie blokuje odczytany
+    wiersz do czasu zatwierdzenia transakcji. Pozwala to uniknąć utraty fragmentów
+    treści podczas scalania kilku wiadomości użytkownika w jedno zgłoszenie.
+    """
 
     threshold = datetime.utcnow() - max_age
     stmt = (
@@ -155,6 +161,8 @@ async def find_recent_text_submission(
         .order_by(Submission.created_at.desc())
         .limit(1)
     )
+    if lock_for_update:
+        stmt = stmt.with_for_update()
     result = await session.execute(stmt)
     submission = result.scalars().first()
     if submission:
