@@ -71,7 +71,13 @@ class Persona(Base):
     is_active: Mapped[bool] = mapped_column(Boolean, default=True, nullable=False)
 
     aliases: Mapped[list["PersonaAlias"]] = relationship("PersonaAlias", back_populates="persona")
-    identities: Mapped[list["PersonaIdentity"]] = relationship("PersonaIdentity", back_populates="persona")
+    identities: Mapped[list["PersonaIdentity"]] = relationship(
+        "PersonaIdentity",
+        back_populates="persona",
+        cascade="all, delete-orphan",
+        passive_deletes=True,
+        order_by="PersonaIdentity.id",
+    )
     bots: Mapped[list[Bot]] = relationship("Bot", back_populates="persona")
 
 

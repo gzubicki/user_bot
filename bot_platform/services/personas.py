@@ -1,13 +1,23 @@
 """Persona and alias helpers."""
 from __future__ import annotations
 
+from dataclasses import dataclass
 from datetime import datetime
 from typing import Optional, Sequence
 
-from sqlalchemy import select
+from sqlalchemy import case, func, select
 from sqlalchemy.ext.asyncio import AsyncSession
 
-from ..models import Persona, PersonaAlias
+from ..models import Persona, PersonaAlias, PersonaIdentity
+
+
+@dataclass(slots=True)
+class PersonaIdentityStats:
+    """Aggregate information about persona identity bindings."""
+
+    persona: Persona
+    active_identities: int
+    total_identities: int
 
 
 async def get_persona_by_alias(session: AsyncSession, alias: str) -> Optional[Persona]:
@@ -76,6 +86,37 @@ async def list_personas(session: AsyncSession) -> Sequence[Persona]:
     return list(result.scalars().all())
 
 
+async def list_personas_with_identity_stats(
+    session: AsyncSession,
+) -> list[PersonaIdentityStats]:
+    stmt = (
+        select(
+            Persona,
+            func.count(PersonaIdentity.id).label("total_identities"),
+            func.coalesce(
+                func.sum(
+                    case((PersonaIdentity.removed_at.is_(None), 1), else_=0)
+                ),
+                0,
+            ).label("active_identities"),
+        )
+        .outerjoin(PersonaIdentity, PersonaIdentity.persona_id == Persona.id)
+        .group_by(Persona.id)
+        .order_by(Persona.name.asc())
+    )
+    result = await session.execute(stmt)
+    stats: list[PersonaIdentityStats] = []
+    for persona, total_identities, active_identities in result.all():
+        stats.append(
+            PersonaIdentityStats(
+                persona=persona,
+                active_identities=int(active_identities or 0),
+                total_identities=int(total_identities or 0),
+            )
+        )
+    return stats
+
+
 async def get_persona_by_id(session: AsyncSession, persona_id: int) -> Optional[Persona]:
     result = await session.execute(select(Persona).where(Persona.id == persona_id))
     return result.scalars().first()
@@ -115,7 +156,9 @@ __all__ = [
     "remove_alias",
     "list_persona_aliases",
     "list_personas",
+    "list_personas_with_identity_stats",
     "get_persona_by_id",
     "get_persona_by_name",
     "create_persona",
+    "PersonaIdentityStats",
 ]

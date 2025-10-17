@@ -25,7 +25,7 @@ from ..services import identities as identities_service
 from ..services import moderation as moderation_service
 from ..services import personas as personas_service
 from ..services import quotes as quotes_service
-from .states import AddBotStates, EditBotStates, ModerationStates
+from .states import AddBotStates, EditBotStates, IdentityStates, ModerationStates
 
 
 logger = logging.getLogger(__name__)
@@ -62,6 +62,7 @@ def _main_menu_keyboard() -> InlineKeyboardBuilder:
     builder.button(text="➕ Dodaj bota", callback_data="menu:add_bot")
     builder.button(text="📋 Lista botów", callback_data="menu:list_bots")
     builder.button(text="✏️ Edytuj bota", callback_data="menu:edit_bot")
+    builder.button(text="🆔 Tożsamości", callback_data="menu:identities")
     builder.button(text="🗳 Moderacja", callback_data="menu:moderation")
     builder.button(text="🔁 Odśwież tokeny", callback_data="menu:refresh_tokens")
     builder.adjust(1)
@@ -117,6 +118,14 @@ def build_dispatcher(
 
     current_persona_id = persona_id
     persona_cache: dict[str, Optional[str]] = {"name": None, "language": None}
+
+    def _format_identity_summary(active: int, total: int) -> str:
+        if total <= 0:
+            return "brak tożsamości"
+        inactive = max(total - active, 0)
+        if inactive == 0:
+            return f"{active} aktywnych"
+        return f"{active} aktywnych, {inactive} wyłączonych"
     MAX_PENDING_PREVIEW = 20
 
     async def _ensure_persona_details() -> tuple[Optional[str], Optional[str]]:
@@ -209,6 +218,181 @@ def build_dispatcher(
 
         return "\n".join(lines), None
 
+    async def _prompt_identity_persona_choice(
+        target: Message | CallbackQuery,
+        state: FSMContext,
+        *,
+        intro: Optional[str] = None,
+    ) -> None:
+        async with get_session() as session:
+            persona_stats = await personas_service.list_personas_with_identity_stats(session)
+
+        if not persona_stats:
+            message_text = (
+                "Brak dostępnych person. Dodaj nowego bota lub personę, aby móc zarządzać tożsamościami."
+            )
+            keyboard = _main_menu_keyboard().as_markup()
+            await state.clear()
+            if isinstance(target, CallbackQuery):
+                await _safe_callback_answer(target)
+                if target.message:
+                    await target.message.answer(message_text, reply_markup=keyboard)
+            else:
+                await target.answer(message_text, reply_markup=keyboard)
+            return
+
+        await state.set_state(IdentityStates.choosing_persona)
+
+        builder = InlineKeyboardBuilder()
+        for summary in persona_stats:
+            persona = summary.persona
+            label = persona.name or f"ID {persona.id}"
+            hint = _format_identity_summary(summary.active_identities, summary.total_identities)
+            builder.button(
+                text=f"{label} · {hint}", callback_data=f"identity:persona:{persona.id}"
+            )
+        builder.button(text="⬅️ Menu główne", callback_data="identity:cancel")
+        builder.adjust(1)
+
+        lines = []
+        if intro:
+            lines.append(intro)
+        lines.append("Wybierz personę, której tożsamości chcesz aktualizować.")
+
+        if isinstance(target, CallbackQuery):
+            await _safe_callback_answer(target)
+            if target.message:
+                await target.message.answer("\n".join(lines), reply_markup=builder.as_markup())
+        else:
+            await target.answer("\n".join(lines), reply_markup=builder.as_markup())
+
+    def _parse_identity_payload(text: str) -> Optional[dict[str, Optional[str | int]]]:
+        content = (text or "").strip()
+        if not content:
+            return None
+
+        user_id: Optional[int] = None
+        username: Optional[str] = None
+        display_name: Optional[str] = None
+
+        fragments = [segment.strip() for segment in re.split(r"[;\n]+", content) if segment.strip()]
+        if not fragments:
+            return None
+
+        for fragment in fragments:
+            normalized = fragment
+            if "=" not in normalized and ":" in normalized:
+                normalized = normalized.replace(":", "=", 1)
+            if "=" in normalized:
+                key, value = normalized.split("=", 1)
+                key = key.strip().lower()
+                value = value.strip().strip('"\'')
+            else:
+                key = None
+                value = normalized.strip().strip('"\'')
+
+            if not value:
+                continue
+
+            if key in {"id", "user_id", "uid"} or (key is None and value.isdigit() and user_id is None):
+                try:
+                    user_id = int(value)
+                except ValueError:
+                    return None
+                continue
+
+            if key in {"alias", "username", "user"} or (
+                key is None and value.startswith("@") and username is None
+            ):
+                username = value
+                continue
+
+            if key in {"name", "display_name", "display"} or key is None:
+                display_name = value
+
+        if not any([user_id, username, display_name]):
+            return None
+
+        return {
+            "telegram_user_id": user_id,
+            "telegram_username": username,
+            "display_name": display_name,
+        }
+
+    async def _render_identity_overview(
+        target: Message | CallbackQuery,
+        state: FSMContext,
+        persona_id: int,
+        *,
+        notice: Optional[str] = None,
+    ) -> None:
+        async with get_session() as session:
+            persona = await personas_service.get_persona_by_id(session, persona_id)
+            if persona is None:
+                await _prompt_identity_persona_choice(
+                    target,
+                    state,
+                    intro="Nie znaleziono wskazanej persony. Wybierz inną z listy.",
+                )
+                return
+            identities = await identities_service.list_persona_identities(
+                session, persona, include_removed=True
+            )
+
+        active = [identity for identity in identities if identity.removed_at is None]
+        removed = [identity for identity in identities if identity.removed_at is not None]
+
+        lines: list[str] = []
+        if notice:
+            lines.append(notice)
+            lines.append("")
+
+        persona_label = html.escape(persona.name or str(persona_id))
+        lines.append(
+            f"Tożsamości persony <b>{persona_label}</b> (ID: <code>{persona_id}</code>)."
+        )
+        lines.append(
+            f"Powiązane wpisy: {_format_identity_summary(len(active), len(identities))}."
+        )
+
+        if active:
+            lines.append("")
+            lines.append("<b>Aktywne wpisy:</b>")
+            for identity in active:
+                description = html.escape(identities_service.describe_identity(identity))
+                lines.append(f"• #{identity.id}: {description}")
+        else:
+            lines.append("")
+            lines.append("Brak aktywnych wpisów. Dodaj nową tożsamość, aby rozpocząć weryfikację.")
+
+        if removed:
+            lines.append("")
+            lines.append("<b>Wyłączone wpisy:</b>")
+            for identity in removed:
+                description = html.escape(identities_service.describe_identity(identity))
+                removed_at = identity.removed_at.strftime("%Y-%m-%d %H:%M") if identity.removed_at else "—"
+                lines.append(f"• #{identity.id}: {description} (wyłączono {removed_at})")
+
+        lines.append("")
+        lines.append(
+            "Możesz zdefiniować wiele wpisów, aby obsłużyć alternatywne konta lub zmiany użytkownika."
+        )
+
+        builder = InlineKeyboardBuilder()
+        builder.button(text="➕ Dodaj tożsamość", callback_data="identity:add")
+        if active:
+            builder.button(text="🗑 Usuń tożsamość", callback_data="identity:remove")
+        builder.button(text="👤 Zmień personę", callback_data="identity:change_persona")
+        builder.button(text="⬅️ Menu główne", callback_data="identity:cancel")
+        builder.adjust(1)
+
+        if isinstance(target, CallbackQuery):
+            await _safe_callback_answer(target)
+            if target.message:
+                await target.message.answer("\n".join(lines), reply_markup=builder.as_markup())
+        else:
+            await target.answer("\n".join(lines), reply_markup=builder.as_markup())
+
     admin_router = Router(name=f"admin-router-{bot_id or 'default'}")
     admin_router.message.filter(lambda message: _is_admin_chat_id(message.chat.id))
     admin_router.callback_query.filter(
@@ -251,6 +435,228 @@ def build_dispatcher(
     @admin_router.message(Command("menu"))
     async def handle_menu(message: Message, state: FSMContext) -> None:
         await _send_menu(message, state, intro="Menu główne")
+
+    @admin_router.callback_query(F.data == "menu:identities")
+    async def handle_identity_menu(callback: CallbackQuery, state: FSMContext) -> None:
+        await _prompt_identity_persona_choice(
+            callback, state, intro="Zarządzanie tożsamościami persony."
+        )
+
+    @admin_router.callback_query(lambda c: c.data == "identity:cancel")
+    async def handle_identity_cancel(callback: CallbackQuery, state: FSMContext) -> None:
+        await _send_menu(callback, state, intro="Menu główne")
+
+    @admin_router.callback_query(
+        IdentityStates.choosing_persona,
+        lambda c: c.data is not None and c.data.startswith("identity:persona:"),
+    )
+    async def handle_identity_persona_choice(callback: CallbackQuery, state: FSMContext) -> None:
+        data_raw = (callback.data or "").split(":")
+        try:
+            persona_id = int(data_raw[-1])
+        except (ValueError, IndexError):
+            await _safe_callback_answer(callback, "Niepoprawna persona.", show_alert=True)
+            return
+
+        await state.update_data(identity_persona_id=persona_id)
+        await state.set_state(IdentityStates.managing_persona)
+        await _render_identity_overview(callback, state, persona_id)
+
+    @admin_router.callback_query(IdentityStates.managing_persona, F.data == "identity:change_persona")
+    async def handle_identity_change_persona(
+        callback: CallbackQuery, state: FSMContext
+    ) -> None:
+        await state.update_data(identity_persona_id=None)
+        await _prompt_identity_persona_choice(
+            callback, state, intro="Wybierz inną personę do aktualizacji tożsamości."
+        )
+
+    @admin_router.callback_query(IdentityStates.managing_persona, F.data == "identity:add")
+    async def handle_identity_add(callback: CallbackQuery, state: FSMContext) -> None:
+        data = await state.get_data()
+        if data.get("identity_persona_id") is None:
+            await _prompt_identity_persona_choice(
+                callback, state, intro="Wybierz najpierw personę, a następnie dodaj tożsamość."
+            )
+            return
+
+        await state.set_state(IdentityStates.waiting_identity_payload)
+        await _safe_callback_answer(callback)
+        instructions = (
+            "Wyślij dane tożsamości w jednej wiadomości. Możesz użyć formatu:\n"
+            "<code>id=123456789\nalias=@przyklad\nname=Jan Kowalski</code>\n"
+            "Wystarczy podać dowolne z pól <code>id</code>, <code>alias</code> lub <code>name</code>.\n"
+            "Aby anulować, wpisz /cancel."
+        )
+        if callback.message:
+            await callback.message.answer(instructions)
+
+    @admin_router.message(IdentityStates.waiting_identity_payload)
+    async def handle_identity_payload(message: Message, state: FSMContext) -> None:
+        data = await state.get_data()
+        persona_id_raw = data.get("identity_persona_id")
+        if persona_id_raw is None:
+            await message.answer("Brak wybranej persony. Wybierz ją ponownie z listy.")
+            await _prompt_identity_persona_choice(
+                message, state, intro="Wybierz personę, której tożsamość chcesz uzupełnić."
+            )
+            return
+
+        parsed = _parse_identity_payload(message.text or message.caption or "")
+        if not parsed:
+            await message.answer(
+                "Nie rozumiem tego formatu. Skorzystaj z kluczy <code>id</code>, <code>alias</code> lub "
+                "<code>name</code> – każdy w osobnej linii lub oddzielone średnikiem."
+            )
+            return
+
+        async with get_session() as session:
+            persona = await personas_service.get_persona_by_id(session, int(persona_id_raw))
+            if persona is None:
+                await message.answer("Wybrana persona już nie istnieje. Wybierz inną.")
+                await _prompt_identity_persona_choice(
+                    message, state, intro="Wybierz personę, której tożsamości chcesz zarządzać."
+                )
+                return
+
+            identity = await identities_service.add_identity(
+                session,
+                persona,
+                telegram_user_id=parsed.get("telegram_user_id"),
+                telegram_username=parsed.get("telegram_username"),
+                display_name=parsed.get("display_name"),
+                admin_user_id=message.from_user.id if message.from_user else None,
+                admin_chat_id=message.chat.id,
+            )
+            description = identities_service.describe_identity(identity)
+            await session.commit()
+
+        await state.set_state(IdentityStates.managing_persona)
+        await message.answer(
+            f"✅ Zapisano tożsamość: <i>{html.escape(description)}</i>."
+        )
+        await _render_identity_overview(message, state, int(persona_id_raw))
+
+    @admin_router.callback_query(IdentityStates.managing_persona, F.data == "identity:remove")
+    async def handle_identity_remove_start(
+        callback: CallbackQuery, state: FSMContext
+    ) -> None:
+        data = await state.get_data()
+        persona_id_raw = data.get("identity_persona_id")
+        if persona_id_raw is None:
+            await _prompt_identity_persona_choice(
+                callback, state, intro="Wybierz personę, dla której chcesz usunąć tożsamość."
+            )
+            return
+
+        async with get_session() as session:
+            persona = await personas_service.get_persona_by_id(session, int(persona_id_raw))
+            if persona is None:
+                await _prompt_identity_persona_choice(
+                    callback, state, intro="Wybrana persona została usunięta. Wybierz inną."
+                )
+                return
+            active_identities = await identities_service.list_persona_identities(
+                session, persona, include_removed=False
+            )
+
+        if not active_identities:
+            await _safe_callback_answer(
+                callback,
+                "Brak aktywnych wpisów do wyłączenia.",
+                show_alert=True,
+            )
+            return
+
+        builder = InlineKeyboardBuilder()
+        for identity in active_identities:
+            label = f"#{identity.id}: {identities_service.describe_identity(identity)}"
+            if len(label) > 60:
+                label = label[:57] + "…"
+            builder.button(text=label, callback_data=f"identity:remove:{identity.id}")
+        builder.button(text="⬅️ Anuluj", callback_data="identity:remove:cancel")
+        builder.adjust(1)
+
+        await state.set_state(IdentityStates.choosing_identity_to_remove)
+        await _safe_callback_answer(callback)
+        if callback.message:
+            await callback.message.answer(
+                "Wybierz wpis, który chcesz wyłączyć.", reply_markup=builder.as_markup()
+            )
+
+    @admin_router.callback_query(
+        IdentityStates.choosing_identity_to_remove,
+        F.data == "identity:remove:cancel",
+    )
+    async def handle_identity_remove_cancel(
+        callback: CallbackQuery, state: FSMContext
+    ) -> None:
+        await state.set_state(IdentityStates.managing_persona)
+        data = await state.get_data()
+        persona_id_raw = data.get("identity_persona_id")
+        if persona_id_raw is None:
+            await _prompt_identity_persona_choice(
+                callback, state, intro="Wybierz personę, której tożsamości chcesz zobaczyć."
+            )
+            return
+        await _render_identity_overview(
+            callback,
+            state,
+            int(persona_id_raw),
+            notice="Anulowano wybór tożsamości do usunięcia.",
+        )
+
+    @admin_router.callback_query(
+        IdentityStates.choosing_identity_to_remove,
+        lambda c: c.data is not None
+        and c.data.startswith("identity:remove:")
+        and c.data != "identity:remove:cancel",
+    )
+    async def handle_identity_remove_confirm(
+        callback: CallbackQuery, state: FSMContext
+    ) -> None:
+        try:
+            identity_id = int((callback.data or "").rsplit(":", 1)[-1])
+        except (ValueError, IndexError):
+            await _safe_callback_answer(callback, "Niepoprawny wpis.", show_alert=True)
+            return
+
+        data = await state.get_data()
+        persona_id_raw = data.get("identity_persona_id")
+        if persona_id_raw is None:
+            await _prompt_identity_persona_choice(
+                callback, state, intro="Wybierz personę, której tożsamości chcesz zarządzać."
+            )
+            return
+
+        async with get_session() as session:
+            identity = await identities_service.get_identity_by_id(session, identity_id)
+            if identity is None or identity.persona_id != int(persona_id_raw):
+                await _safe_callback_answer(
+                    callback, "Nie znaleziono wskazanej tożsamości.", show_alert=True
+                )
+                await state.set_state(IdentityStates.managing_persona)
+                await _render_identity_overview(callback, state, int(persona_id_raw))
+                return
+
+            description = identities_service.describe_identity(identity)
+            await identities_service.remove_identity(
+                session,
+                identity,
+                admin_user_id=callback.from_user.id if callback.from_user else None,
+                admin_chat_id=callback.message.chat.id if callback.message else None,
+            )
+            await session.commit()
+
+        await state.set_state(IdentityStates.managing_persona)
+        await _render_identity_overview(
+            callback,
+            state,
+            int(persona_id_raw),
+            notice=(
+                f"🗑 Wyłączono wpis #{identity_id}: <i>{html.escape(description)}</i>."
+            ),
+        )
 
     @admin_router.message(Command("cancel"))
     @admin_router.message(Command("anuluj"))
@@ -296,6 +702,11 @@ def build_dispatcher(
         await state.clear()
         async with get_session() as session:
             bots = await bots_service.list_bots(session)
+            persona_stats = await personas_service.list_personas_with_identity_stats(session)
+
+        stats_by_persona = {
+            summary.persona.id: summary for summary in persona_stats
+        }
 
         if not bots:
             text = "🚫 Brak aktywnych botów. Wybierz „Dodaj bota”, aby rozpocząć."
@@ -306,6 +717,14 @@ def build_dispatcher(
                 lines.append(
                     f"• <b>{bot_entry.display_name}</b> (persona: <i>{persona_name}</i>, ID: <code>{bot_entry.id}</code>)"
                 )
+                if bot_entry.persona_id in stats_by_persona:
+                    summary = stats_by_persona[bot_entry.persona_id]
+                    identity_note = _format_identity_summary(
+                        summary.active_identities, summary.total_identities
+                    )
+                else:
+                    identity_note = "brak tożsamości"
+                lines.append(f"    ↳ Tożsamości: {identity_note}")
             text = "\n".join(lines)
 
         await _safe_callback_answer(callback)
@@ -819,24 +1238,32 @@ def build_dispatcher(
             await state.update_data(new_display_name=display_name_raw)
 
         async with get_session() as session:
-            personas = await personas_service.list_personas(session)
+            persona_stats = await personas_service.list_personas_with_identity_stats(session)
 
         data = await state.get_data()
         current_persona_id = data.get("current_persona_id")
         current_persona_name = data.get("current_persona_name", "—")
 
-        if personas:
+        if persona_stats:
             await state.update_data(
                 persona_choices=[
-                    {"id": persona.id, "name": persona.name, "language": persona.language}
-                    for persona in personas
+                    {
+                        "id": summary.persona.id,
+                        "name": summary.persona.name,
+                        "language": summary.persona.language,
+                        "active_identities": summary.active_identities,
+                        "total_identities": summary.total_identities,
+                    }
+                    for summary in persona_stats
                 ]
             )
             keyboard_builder = InlineKeyboardBuilder()
-            for persona in personas:
+            for summary in persona_stats:
+                persona = summary.persona
                 prefix = "⭐ " if persona.id == current_persona_id else ""
+                hint = _format_identity_summary(summary.active_identities, summary.total_identities)
                 keyboard_builder.button(
-                    text=f"{prefix}{persona.name} ({persona.language})",
+                    text=f"{prefix}{persona.name} ({persona.language}) · {hint}",
                     callback_data=f"edit_persona:{persona.id}",
                 )
             keyboard_builder.button(text="➕ Nowa persona", callback_data="edit_persona:new")
@@ -1008,19 +1435,27 @@ def build_dispatcher(
         await state.update_data(display_name=display_name)
 
         async with get_session() as session:
-            personas = await personas_service.list_personas(session)
+            persona_stats = await personas_service.list_personas_with_identity_stats(session)
 
-        if personas:
+        if persona_stats:
             await state.update_data(
                 persona_choices=[
-                    {"id": persona.id, "name": persona.name, "language": persona.language}
-                    for persona in personas
+                    {
+                        "id": summary.persona.id,
+                        "name": summary.persona.name,
+                        "language": summary.persona.language,
+                        "active_identities": summary.active_identities,
+                        "total_identities": summary.total_identities,
+                    }
+                    for summary in persona_stats
                 ]
             )
             keyboard_builder = InlineKeyboardBuilder()
-            for persona in personas:
+            for summary in persona_stats:
+                persona = summary.persona
+                hint = _format_identity_summary(summary.active_identities, summary.total_identities)
                 keyboard_builder.button(
-                    text=f"{persona.name} ({persona.language})",
+                    text=f"{persona.name} ({persona.language}) · {hint}",
                     callback_data=f"persona:{persona.id}",
                 )
             keyboard_builder.button(text="➕ Nowa persona", callback_data="persona:new")
