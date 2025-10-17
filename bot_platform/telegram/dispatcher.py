@@ -2356,22 +2356,39 @@ def build_dispatcher(
                         return True
             return False
 
-        if _has_forward_metadata(message):
+        has_forward_metadata = _has_forward_metadata(message)
+
+        if _check_entities(message.entities, message.text or ""):
+            if has_forward_metadata:
+                logger.debug(
+                    "Wiadomość %s zawiera metadane przekazania, ale wykryto wyraźną komendę – traktujemy ją jako wywołanie bota.",
+                    _describe_message(message),
+                )
+            return True
+        if _check_entities(message.caption_entities, message.caption or ""):
+            if has_forward_metadata:
+                logger.debug(
+                    "Wiadomość %s zawiera metadane przekazania, ale wykryto wyraźną komendę w podpisie – traktujemy ją jako wywołanie bota.",
+                    _describe_message(message),
+                )
+            return True
+
+        if contains_explicit_mention(content, username or normalized_username):
+            if has_forward_metadata:
+                logger.debug(
+                    "Wiadomość %s zawiera metadane przekazania, ale odnaleziono bezpośrednie wspomnienie bota – traktujemy ją jako wywołanie.",
+                    _describe_message(message),
+                )
+            return True
+
+        if has_forward_metadata:
             logger.debug(
                 "Wiadomość %s zawiera metadane przekazania – nie traktujemy jej jako wywołania bota.",
                 _describe_message(message),
             )
-            # Przekazane wiadomości traktujemy jak zgłoszenia do moderacji,
-            # niezależnie od ich treści lub oznaczeń w tekście.
+            # Przekazane wiadomości bez jawnej komendy traktujemy jak zgłoszenia do
+            # moderacji, aby zachować dotychczasowy model przesyłania cytatów.
             return False
-
-        if _check_entities(message.entities, message.text or ""):
-            return True
-        if _check_entities(message.caption_entities, message.caption or ""):
-            return True
-
-        if contains_explicit_mention(content, username or normalized_username):
-            return True
 
         if chat_type == "private":
             # W prywatnych wiadomościach brak wyraźnej komendy traktujemy jako zgłoszenie cytatu.
