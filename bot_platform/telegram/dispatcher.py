@@ -621,6 +621,13 @@ def build_dispatcher(
         if intro:
             text_lines.append(intro)
         text_lines.append("Wybierz akcję z przycisków poniżej.")
+        text_lines.append("")
+        text_lines.append("<b>Komendy tekstowe:</b>")
+        text_lines.append("• /menu – pokaż menu główne.")
+        text_lines.append("• /cancel lub /anuluj – przerwij bieżącą operację.")
+        text_lines.append(
+            "• /clear_queue (oraz aliasy /clear-queue, /clear-queque, /panic) – wyczyść kolejkę moderacyjną."
+        )
 
         keyboard = _main_menu_keyboard().as_markup()
         if isinstance(target, CallbackQuery):
