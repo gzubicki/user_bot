@@ -1,7 +1,7 @@
 """Moderation workflow utilities."""
 from __future__ import annotations
 
-from datetime import datetime
+from datetime import datetime, timedelta
 from typing import Iterable, Optional
 
 from sqlalchemy import delete, func, select, update
@@ -129,6 +129,58 @@ async def create_submission(
     return submission
 
 
+async def find_recent_text_submission(
+    session: AsyncSession,
+    *,
+    persona_id: int,
+    submitted_by_user_id: int,
+    submitted_chat_id: int,
+    max_age: timedelta,
+    lock_for_update: bool = False,
+) -> Optional[Submission]:
+    """Return the newest pending text submission within the provided timeframe.
+
+    Gdy ``lock_for_update`` ustawione jest na ``True``, zapytanie blokuje odczytany
+    wiersz do czasu zatwierdzenia transakcji. Pozwala to uniknąć utraty fragmentów
+    treści podczas scalania kilku wiadomości użytkownika w jedno zgłoszenie.
+    """
+
+    threshold = datetime.utcnow() - max_age
+    stmt = (
+        select(Submission)
+        .options(selectinload(Submission.persona).selectinload(Persona.identities))
+        .where(
+            Submission.persona_id == persona_id,
+            Submission.submitted_by_user_id == submitted_by_user_id,
+            Submission.submitted_chat_id == submitted_chat_id,
+            Submission.status == ModerationStatus.PENDING,
+            Submission.media_type == MediaType.TEXT,
+            Submission.file_id.is_(None),
+            Submission.created_at >= threshold,
+        )
+        .order_by(Submission.created_at.desc())
+        .limit(1)
+    )
+    if lock_for_update:
+        stmt = stmt.with_for_update()
+    result = await session.execute(stmt)
+    submission = result.scalars().first()
+    if submission:
+        logger.debug(
+            "Znaleziono ostatnie zgłoszenie tekstowe #%s do aktualizacji (persona_id=%s, user_id=%s).",
+            submission.id,
+            persona_id,
+            submitted_by_user_id,
+        )
+    else:
+        logger.debug(
+            "Brak świeżych zgłoszeń tekstowych do połączenia (persona_id=%s, user_id=%s).",
+            persona_id,
+            submitted_by_user_id,
+        )
+    return submission
+
+
 async def decide_submission(
     session: AsyncSession,
     submission: Submission,
@@ -215,6 +267,7 @@ async def count_pending_submissions(
 
 __all__ = [
     "create_submission",
+    "find_recent_text_submission",
     "list_pending_submissions",
     "get_submission_by_id",
     "decide_submission",
