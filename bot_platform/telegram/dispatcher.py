@@ -2394,6 +2394,18 @@ def build_dispatcher(
 
     async def _reply_with_quote(message: Message, quote: Quote) -> None:
         text_payload = (quote.text_content or "").strip() or "…"
+
+        reply_target: Optional[Message] = None
+        reply_kwargs: dict[str, Any] = {}
+
+        reply_to_message = getattr(message, "reply_to_message", None)
+        if isinstance(reply_to_message, Message):
+            reply_target = reply_to_message
+        else:
+            thread_id = getattr(message, "message_thread_id", None)
+            if thread_id is not None:
+                reply_kwargs["message_thread_id"] = thread_id
+
         async def _send_text() -> None:
             if reply_target is not None:
                 await reply_target.reply(text_payload)
@@ -2425,19 +2437,6 @@ def build_dispatcher(
                     caption=text_payload if quote.text_content else None,
                     **reply_kwargs,
                 )
-            await message.answer(text_payload)
-
-        async def _send_photo() -> None:
-            await message.answer_photo(
-                quote.file_id,
-                caption=text_payload if quote.text_content else None,
-            )
-
-        async def _send_audio() -> None:
-            await message.answer_audio(
-                quote.file_id,
-                caption=text_payload if quote.text_content else None,
-            )
 
         try:
             if quote.media_type == MediaType.TEXT or not quote.file_id:
