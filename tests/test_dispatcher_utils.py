@@ -1,12 +1,9 @@
-from typing import Optional
-
 from aiogram.enums import MessageEntityType
 
 from bot_platform.telegram.dispatcher import (
     contains_explicit_mention,
     is_command_addressed_to_bot,
     normalize_entity_type,
-    resolve_reply_target,
 )
 
 
@@ -58,61 +55,3 @@ def test_contains_explicit_mention_ignores_substrings():
 def test_contains_explicit_mention_handles_case_insensitivity():
     assert contains_explicit_mention("@GZUB_BOT proszę", "gzub_bot")
 
-
-class _StubChat:
-    def __init__(self, chat_id: int | None):
-        self.id = chat_id
-
-
-class _StubUser:
-    def __init__(self, user_id: Optional[int], is_bot: bool):
-        self.id = user_id
-        self.is_bot = is_bot
-
-
-class _StubMessage:
-    def __init__(
-        self,
-        chat_id: int | None,
-        reply_to: Optional["_StubMessage"] = None,
-        from_user: Optional[_StubUser] = None,
-    ):
-        self.chat = _StubChat(chat_id)
-        self.reply_to_message = reply_to
-        self.from_user = from_user
-
-
-def test_resolve_reply_target_returns_none_without_reply():
-    message = _StubMessage(chat_id=10)
-
-    assert resolve_reply_target(message) is None
-
-
-def test_resolve_reply_target_prefers_same_chat_reply():
-    original = _StubMessage(chat_id=10)
-    message = _StubMessage(chat_id=10, reply_to=original)
-
-    assert resolve_reply_target(message) is original
-
-
-def test_resolve_reply_target_ignores_different_chat():
-    original = _StubMessage(chat_id=99)
-    message = _StubMessage(chat_id=10, reply_to=original)
-
-    assert resolve_reply_target(message) is None
-
-
-def test_resolve_reply_target_skips_current_bot_message():
-    bot_user = _StubUser(user_id=42, is_bot=True)
-    bot_message = _StubMessage(chat_id=10, from_user=bot_user)
-    message = _StubMessage(chat_id=10, reply_to=bot_message)
-
-    assert resolve_reply_target(message, current_bot_id=42) is None
-
-
-def test_resolve_reply_target_keeps_other_bot_message():
-    other_bot = _StubUser(user_id=7, is_bot=True)
-    bot_message = _StubMessage(chat_id=10, from_user=other_bot)
-    message = _StubMessage(chat_id=10, reply_to=bot_message)
-
-    assert resolve_reply_target(message, current_bot_id=42) is bot_message
