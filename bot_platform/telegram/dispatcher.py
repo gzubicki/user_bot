@@ -48,6 +48,42 @@ def normalize_entity_type(entity_type: Any) -> str:
     return str(entity_type).lower()
 
 
+def is_command_addressed_to_bot(command: str, normalized_username: Optional[str]) -> bool:
+    """Check whether a bot command targets the current bot.
+
+    Telegram dostarcza treść komendy jako osobną encję – `command` zawiera
+    wyłącznie fragment od ukośnika do końca komendy (bez parametrów). W grupach
+    użytkownicy mogą wpisywać komendy bez dopisku `@bot`, dlatego traktujemy
+    brak sufiksu jako komendę skierowaną do bieżącego bota. Jeżeli jednak
+    pojawi się sufiks, porównujemy go z nazwą użytkownika bota, by uniknąć
+    reagowania na cudze komendy.
+    """
+
+    normalized = command.strip().lower()
+    if not normalized.startswith("/"):
+        return False
+
+    if "@" not in normalized:
+        return True
+
+    suffix = normalized.split("@", 1)[1]
+    if not suffix:
+        return True
+    if normalized_username is None:
+        return False
+    return suffix == normalized_username
+
+
+def contains_explicit_mention(text: str, username: Optional[str]) -> bool:
+    """Return True if `@username` appears in text as a standalone mention."""
+
+    if not text or not username:
+        return False
+
+    pattern = re.compile(rf"(?<![\w@])@{re.escape(username)}(?![\w@])", re.IGNORECASE)
+    return pattern.search(text) is not None
+
+
 def resolve_reply_target(message: Message) -> Optional[Message]:
     """Return message that should receive the bot reply, if different from the request."""
 
@@ -1931,7 +1967,10 @@ def build_dispatcher(
             if not entities or not text:
                 return False
             for entity in entities:
-                snippet = text[entity.offset : entity.offset + entity.length]
+                try:
+                    snippet = entity.extract_from(text)
+                except Exception:  # pragma: no cover - defensywny fallback
+                    snippet = text[entity.offset : entity.offset + entity.length]
                 entity_type = normalize_entity_type(getattr(entity, "type", ""))
                 if (
                     entity_type.endswith("mention")
@@ -1943,6 +1982,7 @@ def build_dispatcher(
                     if entity.user.id == bot_id:
                         return True
                 if entity_type.endswith("bot_command"):
+                    if is_command_addressed_to_bot(snippet, normalized_username):
                     command = snippet.lower()
                     if normalized_username and command.endswith(f"@{normalized_username}"):
                         return True
@@ -1964,7 +2004,7 @@ def build_dispatcher(
         if _check_entities(message.caption_entities, message.caption or ""):
             return True
 
-        if normalized_username and f"@{normalized_username}" in content.lower():
+        if contains_explicit_mention(content, username or normalized_username):
             return True
 
         if chat_type == "private":
@@ -1977,6 +2017,29 @@ def build_dispatcher(
         text_payload = (quote.text_content or "").strip() or "…"
         reply_target = resolve_reply_target(message)
 
+        reply_kwargs: dict[str, Any] = {}
+        if reply_target is not None and getattr(reply_target, "message_id", None):
+            reply_kwargs = {
+                "reply_to_message_id": reply_target.message_id,
+                "allow_sending_without_reply": True,
+            }
+
+        async def _send_text() -> None:
+            await message.answer(text_payload, **reply_kwargs)
+
+        async def _send_photo() -> None:
+            await message.answer_photo(
+                quote.file_id,
+                caption=text_payload if quote.text_content else None,
+                **reply_kwargs,
+            )
+
+        async def _send_audio() -> None:
+            await message.answer_audio(
+                quote.file_id,
+                caption=text_payload if quote.text_content else None,
+                **reply_kwargs,
+            )
         async def _send_text() -> None:
             if reply_target is not None:
                 await reply_target.reply(text_payload)
@@ -2017,6 +2080,7 @@ def build_dispatcher(
             else:
                 await _send_text()
         except TelegramBadRequest:
+            await message.answer(text_payload, **reply_kwargs)
             if reply_target is not None:
                 await reply_target.reply(text_payload)
             else:
