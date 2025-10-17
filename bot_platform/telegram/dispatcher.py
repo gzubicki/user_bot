@@ -5,7 +5,7 @@ import html
 import logging
 import re
 from dataclasses import dataclass
-from datetime import datetime, timedelta
+from datetime import UTC, datetime, timedelta
 from typing import Any, Iterable, Optional
 
 from sqlalchemy.ext.asyncio import AsyncSession
@@ -17,7 +17,13 @@ from aiogram.exceptions import TelegramBadRequest, TelegramNetworkError, Telegra
 from aiogram.filters import Command, CommandStart
 from aiogram.filters.command import CommandObject
 from aiogram.fsm.context import FSMContext
-from aiogram.types import CallbackQuery, InlineKeyboardMarkup, Message
+from aiogram.types import (
+    BotCommand,
+    BotCommandScopeChat,
+    CallbackQuery,
+    InlineKeyboardMarkup,
+    Message,
+)
 from aiogram.utils.keyboard import InlineKeyboardBuilder
 
 
@@ -58,7 +64,89 @@ _MEMBERSHIP_EVENT_CONTENT_TYPES = frozenset(
 )
 
 
-_USER_SUBMISSION_MERGE_WINDOW = timedelta(seconds=2)
+QuoteSignature = tuple[int | None, str | None, str]
+
+
+@dataclass(slots=True)
+class _ChatResponseCacheEntry:
+    signature: QuoteSignature
+    expires_at: datetime
+
+
+_CHAT_RESPONSE_CACHE: dict[tuple[object, object], _ChatResponseCacheEntry] = {}
+_CHAT_RESPONSE_TTL = timedelta(minutes=5)
+
+
+def _clear_response_cache() -> None:
+    """Usuń wszystkie zapamiętane odpowiedzi (pomocnicze w testach)."""
+
+    _CHAT_RESPONSE_CACHE.clear()
+
+
+def _safe_normalize_identifier(value: object) -> object:
+    if value is None:
+        return None
+    try:
+        return int(value)
+    except (TypeError, ValueError):
+        return value
+
+
+def _chat_cache_key(chat_id: object, thread_id: object) -> tuple[object, object]:
+    return _safe_normalize_identifier(chat_id), _safe_normalize_identifier(thread_id)
+
+
+def _ensure_utc(dt: datetime) -> datetime:
+    if dt.tzinfo is None:
+        return dt.replace(tzinfo=UTC)
+    return dt.astimezone(UTC)
+
+
+def _prune_expired_chat_cache(now: datetime) -> None:
+    normalized_now = _ensure_utc(now)
+    expired_keys = [key for key, entry in _CHAT_RESPONSE_CACHE.items() if entry.expires_at <= normalized_now]
+    for key in expired_keys:
+        _CHAT_RESPONSE_CACHE.pop(key, None)
+
+
+def _remember_chat_response(
+    chat_id: object,
+    thread_id: object,
+    signature: QuoteSignature,
+    *,
+    now: datetime | None = None,
+) -> None:
+    reference_time = _ensure_utc(now) if now is not None else datetime.now(UTC)
+    _prune_expired_chat_cache(reference_time)
+    key = _chat_cache_key(chat_id, thread_id)
+    _CHAT_RESPONSE_CACHE[key] = _ChatResponseCacheEntry(
+        signature=signature,
+        expires_at=reference_time + _CHAT_RESPONSE_TTL,
+    )
+
+
+def _is_duplicate_chat_response(
+    chat_id: object,
+    thread_id: object,
+    signature: QuoteSignature,
+    *,
+    now: datetime | None = None,
+) -> bool:
+    reference_time = _ensure_utc(now) if now is not None else datetime.now(UTC)
+    _prune_expired_chat_cache(reference_time)
+    key = _chat_cache_key(chat_id, thread_id)
+    entry = _CHAT_RESPONSE_CACHE.get(key)
+    if entry is None:
+        return False
+    if entry.signature != signature:
+        return False
+    entry.expires_at = reference_time + _CHAT_RESPONSE_TTL
+    return True
+
+
+def _build_quote_signature(quote: Quote) -> QuoteSignature:
+    text = (quote.text_content or "").strip()
+    return getattr(quote, "id", None), getattr(quote, "file_id", None), text
 
 
 def _format_user_link(user_id: Optional[int]) -> str:
@@ -595,6 +683,30 @@ def build_dispatcher(
                 await target.message.answer("\n".join(lines), reply_markup=builder.as_markup())
         else:
             await target.answer("\n".join(lines), reply_markup=builder.as_markup())
+
+    async def _configure_admin_commands() -> None:
+        try:
+            chat_id = int(admin_chat_id)
+        except (TypeError, ValueError):
+            logger.warning(
+                "Nie można ustawić komend – niepoprawny identyfikator czatu administracyjnego: %r",
+                admin_chat_id,
+            )
+            return
+
+        commands = [
+            BotCommand(command="start", description="Rozpocznij pracę z botem"),
+            BotCommand(command="menu", description="Pokaż menu główne"),
+            BotCommand(command="cancel", description="Przerwij bieżącą operację"),
+            BotCommand(command="clear_queue", description="Wyczyść kolejkę moderacji"),
+        ]
+
+        try:
+            await bot.set_my_commands(commands, scope=BotCommandScopeChat(chat_id=chat_id))
+        except TelegramBadRequest as exc:
+            logger.warning("Nie udało się ustawić komend w czacie administracyjnym: %s", exc)
+
+    dispatcher.startup.register(_configure_admin_commands)
 
     admin_router = Router(name=f"admin-router-{bot_id or 'default'}")
     admin_router.message.filter(lambda message: _is_admin_chat_id(message.chat.id))
@@ -2591,7 +2703,22 @@ def build_dispatcher(
             await message.answer("Niestety, nie znalazłem odpowiedniego cytatu.")
             return
 
+        chat_identifier = getattr(message.chat, "id", None)
+        thread_identifier = getattr(message, "message_thread_id", None)
+        signature = _build_quote_signature(quote)
+        if _is_duplicate_chat_response(chat_identifier, thread_identifier, signature):
+            logger.info(
+                "Pomijam duplikat odpowiedzi dla czatu %s (wątek=%s)",
+                chat_identifier,
+                thread_identifier,
+            )
+            await message.answer(
+                "W ciągu ostatnich 5 minut udzieliłem już identycznej odpowiedzi. Pomijam duplikat."
+            )
+            return
+
         await _reply_with_quote(message, quote)
+        _remember_chat_response(chat_identifier, thread_identifier, signature)
 
     dispatcher.include_router(admin_router)
     dispatcher.include_router(public_router)
