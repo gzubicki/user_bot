@@ -815,10 +815,12 @@ def build_dispatcher(
             await callback.message.answer(text, reply_markup=_main_menu_keyboard().as_markup())
 
     def _snapshot_submission(submission: Submission) -> dict[str, Any]:
+        persona = submission.__dict__.get("persona")
+
         return {
             "id": submission.id,
             "persona_id": submission.persona_id,
-            "persona_name": submission.persona.name if submission.persona else None,
+            "persona_name": persona.name if persona else None,
             "submitted_by_user_id": submission.submitted_by_user_id,
             "submitted_chat_id": submission.submitted_chat_id,
             "submitted_by_username": submission.submitted_by_username,

@@ -271,8 +271,9 @@ async def create_quote_from_submission(
     """Create a quote from a moderated submission."""
 
     language = override_language
-    if language is None and submission.persona is not None:
-        language = submission.persona.language
+    persona = submission.__dict__.get("persona")
+    if language is None and persona is not None:
+        language = persona.language
     if not language:
         language = "auto"
 
