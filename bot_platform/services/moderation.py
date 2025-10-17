@@ -8,7 +8,13 @@ from sqlalchemy import func, select, update
 from sqlalchemy.ext.asyncio import AsyncSession
 from sqlalchemy.orm import selectinload
 
-from ..models import MediaType, ModerationAction, ModerationStatus, Submission
+from ..models import (
+    MediaType,
+    ModerationAction,
+    ModerationStatus,
+    Persona,
+    Submission,
+)
 
 
 async def list_pending_submissions(
@@ -21,7 +27,7 @@ async def list_pending_submissions(
     stmt = (
         select(Submission)
         .options(
-            selectinload(Submission.persona).selectinload("identities")
+            selectinload(Submission.persona).selectinload(Persona.identities)
         )
         .where(Submission.status == ModerationStatus.PENDING)
     )
@@ -42,7 +48,7 @@ async def get_submission_by_id(session: AsyncSession, submission_id: int) -> Opt
     stmt = (
         select(Submission)
         .options(
-            selectinload(Submission.persona).selectinload("identities")
+            selectinload(Submission.persona).selectinload(Persona.identities)
         )
         .where(Submission.id == submission_id)
     )
