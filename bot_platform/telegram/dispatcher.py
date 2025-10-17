@@ -2414,7 +2414,7 @@ def build_dispatcher(
         text_payload = (quote.text_content or "").strip() or "…"
 
         reply_target: Optional[Message] = None
-        reply_kwargs: dict[str, Any] = {}
+        direct_send_kwargs: dict[str, Any] = {"chat_id": message.chat.id}
 
         reply_to_message = getattr(message, "reply_to_message", None)
         if isinstance(reply_to_message, Message):
@@ -2431,13 +2431,13 @@ def build_dispatcher(
         if reply_target is None:
             thread_id = getattr(message, "message_thread_id", None)
             if thread_id is not None:
-                reply_kwargs["message_thread_id"] = thread_id
+                direct_send_kwargs["message_thread_id"] = thread_id
 
         async def _send_text() -> None:
             if reply_target is not None:
                 await reply_target.reply(text_payload)
             else:
-                await message.answer(text_payload, **reply_kwargs)
+                await message.bot.send_message(text=text_payload, **direct_send_kwargs)
 
         async def _send_photo() -> None:
             if reply_target is not None:
@@ -2446,10 +2446,10 @@ def build_dispatcher(
                     caption=text_payload if quote.text_content else None,
                 )
             else:
-                await message.answer_photo(
+                await message.bot.send_photo(
                     quote.file_id,
                     caption=text_payload if quote.text_content else None,
-                    **reply_kwargs,
+                    **direct_send_kwargs,
                 )
 
         async def _send_audio() -> None:
@@ -2459,10 +2459,10 @@ def build_dispatcher(
                     caption=text_payload if quote.text_content else None,
                 )
             else:
-                await message.answer_audio(
+                await message.bot.send_audio(
                     quote.file_id,
                     caption=text_payload if quote.text_content else None,
-                    **reply_kwargs,
+                    **direct_send_kwargs,
                 )
 
         try:
@@ -2475,7 +2475,7 @@ def build_dispatcher(
             else:
                 await _send_text()
         except TelegramBadRequest:
-            await message.answer(text_payload, **reply_kwargs)
+            await message.bot.send_message(text=text_payload, **direct_send_kwargs)
 
     async def _resolve_language_priority(persona_language: Optional[str], message: Message) -> list[str]:
         priority: list[str] = []
