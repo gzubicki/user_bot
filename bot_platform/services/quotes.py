@@ -11,7 +11,11 @@ from typing import Iterable, Optional, Sequence
 from sqlalchemy import func, select
 from sqlalchemy.ext.asyncio import AsyncSession
 
+from ..logging_config import get_logger
 from ..models import MediaType, Persona, Quote, Submission
+
+
+logger = get_logger(__name__)
 
 _WORD_RE = re.compile(r"[\wÀ-ÖØ-öø-ÿ']+", re.UNICODE)
 _STOP_WORDS = {
@@ -92,13 +96,20 @@ async def count_quotes(session: AsyncSession, persona: Persona) -> int:
     result = await session.execute(
         select(func.count(Quote.id)).where(Quote.persona_id == persona.id)
     )
-    return int(result.scalar_one())
+    total = int(result.scalar_one())
+    logger.debug("Persona ID=%s posiada %s cytatów", persona.id, total)
+    return total
 
 
 async def random_quote(session: AsyncSession, persona: Persona) -> Optional[Quote]:
     stmt = select(Quote).where(Quote.persona_id == persona.id).order_by(func.random()).limit(1)
     result = await session.execute(stmt)
-    return result.scalars().first()
+    quote = result.scalars().first()
+    if quote is None:
+        logger.warning("Brak cytatów dla persony ID=%s", persona.id)
+    else:
+        logger.debug("Wylosowano cytat ID=%s dla persony ID=%s", quote.id, persona.id)
+    return quote
 
 
 async def find_quotes_by_language(
@@ -113,14 +124,24 @@ async def find_quotes_by_language(
         stmt = stmt.where(Quote.language == language)
     stmt = stmt.order_by(Quote.created_at.desc()).limit(limit)
     result = await session.execute(stmt)
-    return list(result.scalars().all())
+    quotes = list(result.scalars().all())
+    logger.info(
+        "Pobrano %s cytatów dla persony ID=%s (język=%s)",
+        len(quotes),
+        persona.id,
+        language or "*",
+    )
+    return quotes
 
 
 def choose_best_quote(candidates: Iterable[Quote]) -> Optional[Quote]:
     candidates = list(candidates)
     if not candidates:
+        logger.debug("Brak kandydatów do wyboru najlepszego cytatu")
         return None
-    return choice(candidates)
+    selected = choice(candidates)
+    logger.debug("Wybrano cytat ID=%s jako najlepszy spośród %s", selected.id, len(candidates))
+    return selected
 
 
 def _prepare_language_priority(language_priority: Optional[Sequence[str]]) -> list[str]:
@@ -168,10 +189,12 @@ async def search_quotes_by_relevance(
     candidates = list(result.scalars().all())
 
     if not normalized_query:
+        logger.debug("Zapytanie puste – zwracam %s najnowszych cytatów", limit)
         return candidates[:limit]
 
     query_tokens = _tokenize(normalized_query)
     if not query_tokens:
+        logger.debug("Nie udało się ztokenizować zapytania – zwracam %s cytatów", limit)
         return candidates[:limit]
 
     ranked: list[tuple[float, Quote]] = []
@@ -190,11 +213,18 @@ async def search_quotes_by_relevance(
     ranked.sort(key=lambda item: item[0], reverse=True)
 
     if not ranked:
+        logger.debug("Brak dopasowań – zwracam %s kandydatów", limit)
         return candidates[:limit]
 
     meaningful = [quote for score, quote in ranked if score > 0]
     if meaningful:
+        logger.info(
+            "Zwracam %s cytatów najbardziej pasujących do zapytania '%s'",
+            min(len(meaningful), limit),
+            normalized_query,
+        )
         return meaningful[:limit]
+    logger.debug("Brak cytatów o dodatnim wyniku – zwracam %s najlepszych", limit)
     return [quote for _, quote in ranked[:limit]]
 
 
@@ -213,9 +243,24 @@ async def select_relevant_quote(
         limit=5,
     )
     if candidates:
+        logger.info(
+            "Wybrano cytat ID=%s jako najlepsze dopasowanie do zapytania '%s'",
+            candidates[0].id,
+            query,
+        )
         return candidates[0]
 
     fallback = await random_quote(session, persona)
+    if fallback is not None:
+        logger.info(
+            "Brak dopasowań – zwracam losowy cytat ID=%s dla persony ID=%s",
+            fallback.id,
+            persona.id,
+        )
+    else:
+        logger.warning(
+            "Brak cytatów do zaprezentowania dla persony ID=%s", persona.id
+        )
     return fallback
 async def create_quote_from_submission(
     session: AsyncSession,
@@ -247,6 +292,11 @@ async def create_quote_from_submission(
     )
     session.add(quote)
     await session.flush()
+    logger.info(
+        "Dodano cytat ID=%s na podstawie zgłoszenia ID=%s",
+        quote.id,
+        submission.id,
+    )
     return quote
 
 

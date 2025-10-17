@@ -11,7 +11,11 @@ from sqlalchemy.ext.asyncio import AsyncSession
 from sqlalchemy.orm import selectinload
 
 from ..database import get_session
+from ..logging_config import get_logger
 from ..models import Bot
+
+
+logger = get_logger(__name__)
 
 
 @dataclass(slots=True, frozen=True)
@@ -41,6 +45,7 @@ async def _load_tokens_from_db() -> Dict[str, ActiveBotToken]:
             tokens[api_token] = ActiveBotToken(
                 bot_id=bot_id, token=api_token, display_name=display_name, persona_id=persona_id
             )
+    logger.info("Załadowano %s aktywnych tokenów botów z bazy", len(tokens))
     return tokens
 
 
@@ -55,28 +60,41 @@ async def get_active_bot_tokens(force_refresh: bool = False) -> Dict[str, Active
         and _CACHE_EXPIRATION is not None
         and _CACHE_EXPIRATION > now
     ):
+        logger.debug(
+            "Zwracam cache tokenów botów (pozostało %ss ważności)",
+            int((_CACHE_EXPIRATION - now).total_seconds()),
+        )
         return _TOKEN_CACHE
 
     _TOKEN_CACHE = await _load_tokens_from_db()
     _CACHE_EXPIRATION = now + _CACHE_TTL
+    logger.info("Odświeżono cache tokenów botów – ważny do %s", _CACHE_EXPIRATION.isoformat())
     return _TOKEN_CACHE
 
 
 async def get_bot_by_token(token: str) -> ActiveBotToken | None:
     """Zwraca informacje o bocie powiązanym z tokenem lub ``None``."""
 
+    logger.debug("Wyszukuję bota po tokenie (hash skrócony): %s...", token[:6])
     tokens = await get_active_bot_tokens()
     bot = tokens.get(token)
     if bot is not None:
+        logger.info("Znaleziono bota ID=%s po tokenie", bot.bot_id)
         return bot
 
     tokens = await get_active_bot_tokens(force_refresh=True)
-    return tokens.get(token)
+    bot = tokens.get(token)
+    if bot is None:
+        logger.warning("Nie znaleziono bota dla przekazanego tokena")
+    else:
+        logger.info("Po odświeżeniu cache znaleziono bota ID=%s", bot.bot_id)
+    return bot
 
 
 async def refresh_bot_token_cache() -> Dict[str, ActiveBotToken]:
     """Czyści cache i ponownie ładuje tokeny z bazy danych."""
 
+    logger.info("Ręczne odświeżanie cache tokenów botów")
     return await get_active_bot_tokens(force_refresh=True)
 
 
@@ -86,7 +104,9 @@ def _hash_token(token: str) -> str:
 
 async def count_bots(session: AsyncSession) -> int:
     result = await session.execute(select(func.count(Bot.id)))
-    return int(result.scalar_one())
+    total = int(result.scalar_one())
+    logger.debug("W bazie znajduje się %s botów", total)
+    return total
 
 
 class BotLimitExceededError(Exception):
@@ -133,6 +153,12 @@ async def upsert_bot(
         )
         session.add(bot)
         created = True
+        logger.info(
+            "Dodano nowego bota '%s' (persona_id=%s); bieżąca liczba botów: %s",
+            display_name,
+            persona_id,
+            total + 1,
+        )
     else:
         bot = existing_bot
         bot.api_token = token
@@ -140,21 +166,30 @@ async def upsert_bot(
         bot.display_name = display_name
         bot.persona_id = persona_id
         bot.is_active = True
+        logger.info("Zaktualizowano bota ID=%s nowymi danymi", bot.id)
 
     await session.flush()
+    logger.debug("Zapisano zmiany bota ID=%s w sesji", bot.id)
     return bot, created
 
 
 async def list_bots(session: AsyncSession) -> Iterable[Bot]:
     stmt = select(Bot).options(selectinload(Bot.persona)).order_by(Bot.created_at.desc())
     result = await session.execute(stmt)
-    return list(result.scalars().all())
+    bots = list(result.scalars().all())
+    logger.info("Pobrano listę %s botów", len(bots))
+    return bots
 
 
 async def get_bot_by_id(session: AsyncSession, bot_id: int) -> Optional[Bot]:
     stmt = select(Bot).options(selectinload(Bot.persona)).where(Bot.id == bot_id)
     result = await session.execute(stmt)
-    return result.scalars().first()
+    bot = result.scalars().first()
+    if bot is None:
+        logger.warning("Nie znaleziono bota o ID=%s", bot_id)
+    else:
+        logger.debug("Znaleziono bota ID=%s (persona_id=%s)", bot.id, bot.persona_id)
+    return bot
 
 
 async def update_bot(
@@ -185,6 +220,7 @@ async def update_bot(
 
     bot.is_active = True
     await session.flush()
+    logger.info("Zaktualizowano konfigurację bota ID=%s", bot.id)
     return bot
 
 
