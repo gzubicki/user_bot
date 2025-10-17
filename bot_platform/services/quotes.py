@@ -345,6 +345,7 @@ async def select_relevant_quote(
     query: str,
     language_priority: Optional[Sequence[str]] = None,
 ) -> Optional[Quote]:
+    normalized_query = (query or "").strip()
     candidates = await search_quotes_by_relevance(
         session,
         persona,
@@ -352,13 +353,24 @@ async def select_relevant_quote(
         language_priority=language_priority,
         limit=5,
     )
+
     if candidates:
-        logger.info(
-            "Wybrano cytat ID=%s jako najlepsze dopasowanie do zapytania '%s'",
-            candidates[0].id,
-            query,
-        )
-        return candidates[0]
+        if normalized_query:
+            selected = candidates[0]
+            logger.info(
+                "Wybrano cytat ID=%s jako najlepsze dopasowanie do zapytania '%s'",
+                selected.id,
+                normalized_query,
+            )
+            return selected
+
+        selected = choose_best_quote(candidates)
+        if selected is not None:
+            logger.info(
+                "Wybrano losowy cytat ID=%s w odpowiedzi na puste zapytanie",
+                selected.id,
+            )
+            return selected
 
     fallback = await random_quote(session, persona)
     if fallback is not None:
