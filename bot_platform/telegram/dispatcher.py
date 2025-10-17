@@ -2421,8 +2421,14 @@ def build_dispatcher(
         quoted_username: Optional[str] = None
         quoted_name: Optional[str] = None
 
-        if _has_forward_metadata(message):
-            quoted_user_id, quoted_username, quoted_name = _extract_forwarded_author(message)
+        if not _has_forward_metadata(message):
+            logger.info(
+                "Pomijamy wiadomość %s – brak metadanych przekazania (nie jest przekierowaniem do bota).",
+                _describe_message(message),
+            )
+            return
+
+        quoted_user_id, quoted_username, quoted_name = _extract_forwarded_author(message)
 
         if message.content_type in _MEMBERSHIP_EVENT_CONTENT_TYPES:
             logger.debug(
