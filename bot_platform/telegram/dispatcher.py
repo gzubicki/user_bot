@@ -2400,6 +2400,15 @@ def build_dispatcher(
             return
 
         if message.from_user is None:
+            sender_chat = getattr(message, "sender_chat", None)
+            sender_chat_type = getattr(sender_chat, "type", None)
+            if sender_chat_type == "channel":
+                logger.debug(
+                    "Pomijamy wiadomość %s – została opublikowana w imieniu kanału.",
+                    _describe_message(message),
+                )
+                return
+
             await message.answer("Nie udało się rozpoznać nadawcy wiadomości.")
             return
 
