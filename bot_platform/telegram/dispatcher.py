@@ -10,6 +10,13 @@ from typing import Any, Iterable, Optional
 
 from aiogram import Bot, Dispatcher, F, Router
 from aiogram.client.default import DefaultBotProperties
+from aiogram.enums import ParseMode
+from aiogram.exceptions import (
+    SkipHandler,
+    TelegramBadRequest,
+    TelegramNetworkError,
+    TelegramUnauthorizedError,
+)
 from aiogram.enums import MessageEntityType, ParseMode
 from aiogram.exceptions import TelegramBadRequest, TelegramNetworkError, TelegramUnauthorizedError
 from aiogram.filters import Command, CommandStart
@@ -2046,10 +2053,10 @@ def build_dispatcher(
 
         if not await _is_direct_invocation(message):
             logger.debug(
-                "Wiadomość %s nie została zakwalifikowana jako wywołanie bota – pomijamy.",
+                "Wiadomość %s nie została zakwalifikowana jako wywołanie bota – przekazujemy dalej.",
                 _describe_message(message),
             )
-            return
+            raise SkipHandler()
 
         if bot_id is None:
             await message.answer("Ten bot nie jest jeszcze skonfigurowany – brak powiązanej persony.")
