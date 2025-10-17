@@ -308,6 +308,54 @@ def build_dispatcher(
             },
         }
 
+    async def _build_duplicate_snapshot(
+        session: AsyncSession, submission: Submission
+    ) -> dict[str, Any]:
+        persona_id = submission.persona_id
+        if persona_id is None:
+            return {"checked": False, "exact": None, "match_type": None}
+
+        try:
+            media_type_enum = (
+                submission.media_type
+                if isinstance(submission.media_type, MediaType)
+                else MediaType(submission.media_type)
+            )
+        except ValueError:
+            media_type_enum = MediaType.TEXT
+
+        duplicate_result = await quotes_service.find_exact_duplicate(
+            session,
+            persona_id=persona_id,
+            media_type=media_type_enum,
+            text_content=submission.text_content,
+            file_id=submission.file_id,
+            file_hash=submission.file_hash,
+        )
+
+        if duplicate_result is None:
+            return {"checked": True, "exact": None, "match_type": None}
+
+        duplicate_quote, match_type = duplicate_result
+        text_preview = (duplicate_quote.text_content or "").strip() or None
+        media_value = (
+            duplicate_quote.media_type.value
+            if isinstance(duplicate_quote.media_type, MediaType)
+            else duplicate_quote.media_type
+        )
+
+        return {
+            "checked": True,
+            "match_type": match_type,
+            "exact": {
+                "id": duplicate_quote.id,
+                "media_type": media_value,
+                "language": duplicate_quote.language,
+                "text_preview": text_preview,
+                "file_id": duplicate_quote.file_id,
+            },
+        }
+
     def _format_queue_summary_line(snapshot: dict[str, Any]) -> str:
         persona_value = snapshot.get("persona_name") or snapshot.get("persona_id") or "—"
         persona_label = html.escape(str(persona_value))
@@ -907,9 +955,9 @@ def build_dispatcher(
                 limit=MAX_PENDING_PREVIEW,
                 exclude_ids=exclude_ids,
             )
-        snapshots: list[dict[str, Any]] = []
-        for item in submissions:
-            snapshots.append(await _snapshot_submission(session, item))
+            snapshots: list[dict[str, Any]] = []
+            for item in submissions:
+                snapshots.append(await _snapshot_submission(session, item))
         return snapshots, total_pending
 
     async def _compose_submission_view(
@@ -2392,23 +2440,94 @@ def build_dispatcher(
             )
             return
 
+        duplicate_notice: Optional[dict[str, Any]] = None
+        submission: Optional[Submission] = None
+        submission_snapshot: Optional[dict[str, Any]] = None
+
         async with get_session() as session:
-            submission = await moderation_service.create_submission(
-                session,
-                persona_id=current_persona_id,
-                submitted_by_user_id=message.from_user.id,
-                submitted_chat_id=message.chat.id,
-                submitted_by_username=submitted_by_username,
-                submitted_by_name=submitted_by_name,
-                quoted_user_id=quoted_user_id,
-                quoted_username=quoted_username,
-                quoted_name=quoted_name,
-                media_type=media_type_enum,
-                text_content=text_content,
-                file_id=file_id,
-            )
-            await session.commit()
-            submission_snapshot = await _snapshot_submission(session, submission)
+            if current_persona_id is not None:
+                duplicate_result = await quotes_service.find_exact_duplicate(
+                    session,
+                    persona_id=current_persona_id,
+                    media_type=media_type_enum,
+                    text_content=text_content,
+                    file_id=file_id,
+                )
+                if duplicate_result is not None:
+                    duplicate_quote, match_type = duplicate_result
+                    duplicate_notice = {
+                        "id": duplicate_quote.id,
+                        "match_type": match_type,
+                        "text_preview": (duplicate_quote.text_content or "").strip() or None,
+                        "media_type": (
+                            duplicate_quote.media_type.value
+                            if isinstance(duplicate_quote.media_type, MediaType)
+                            else duplicate_quote.media_type
+                        ),
+                        "file_id": duplicate_quote.file_id,
+                    }
+                    logger.info(
+                        "Odrzucono wiadomość %s – duplikat istniejącego cytatu #%s (match_type=%s).",
+                        _describe_message(message),
+                        duplicate_quote.id,
+                        match_type,
+                    )
+
+            if duplicate_notice is None:
+                submission = await moderation_service.create_submission(
+                    session,
+                    persona_id=current_persona_id,
+                    submitted_by_user_id=message.from_user.id,
+                    submitted_chat_id=message.chat.id,
+                    submitted_by_username=submitted_by_username,
+                    submitted_by_name=submitted_by_name,
+                    media_type=media_type_enum,
+                    text_content=text_content,
+                    file_id=file_id,
+                )
+                await session.commit()
+                submission_snapshot = await _snapshot_submission(session, submission)
+
+        if duplicate_notice is not None:
+            match_labels = {
+                "text": "treści",
+                "file_id": "identyfikatora pliku",
+                "file_hash": "hashu pliku",
+            }
+            match_label = match_labels.get(duplicate_notice["match_type"], "zawartości")
+            response_lines = [
+                "🔁 Ten cytat jest już w naszej bazie – nie dodaliśmy nowego zgłoszenia.",
+                f"Znaleziono dopasowanie na podstawie {match_label} (ID: <code>{duplicate_notice['id']}</code>).",
+            ]
+            preview = duplicate_notice.get("text_preview")
+            if preview:
+                response_lines.append("")
+                response_lines.append(f"Podgląd: <i>{html.escape(preview[:200])}</i>")
+
+            await message.answer("\n".join(response_lines))
+
+            if admin_chat_id and message.chat.id != admin_chat_id:
+                persona_name, _ = await _ensure_persona_details()
+                admin_lines = [
+                    "♻️ <b>Zgłoszenie odrzucone automatycznie – duplikat</b>",
+                    f"Persona: <i>{html.escape(persona_name or str(current_persona_id))}</i>",
+                    f"Użytkownik: <code>{message.from_user.id}</code>",
+                    f"Czat: <code>{message.chat.id}</code>",
+                    f"Typ: <code>{html.escape(media_type_enum.value)}</code>",
+                    f"Dopasowanie na podstawie {match_label}.",
+                    f"Istniejący cytat: <code>{duplicate_notice['id']}</code>",
+                ]
+                duplicate_file_id = duplicate_notice.get("file_id")
+                if duplicate_file_id:
+                    admin_lines.append(f"Plik: <code>{html.escape(duplicate_file_id)}</code>")
+                if preview:
+                    admin_lines.append("")
+                    admin_lines.append(html.escape(preview[:200]))
+                await message.bot.send_message(admin_chat_id, "\n".join(admin_lines))
+
+            return
+
+        assert submission is not None and submission_snapshot is not None
 
         logger.info(
             "Przekazano wiadomość %s do kolejki moderacyjnej jako zgłoszenie #%s.",
