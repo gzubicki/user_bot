@@ -48,6 +48,22 @@ from .states import AddBotStates, EditBotStates, IdentityStates, ModerationState
 logger = logging.getLogger(__name__)
 
 
+def _format_user_link(user_id: Optional[int]) -> str:
+    """Zwróć link do profilu Telegramu lub czytelny fallback dla braku ID."""
+
+    if user_id is None:
+        return "<code>—</code>"
+
+    try:
+        numeric_id = int(user_id)
+    except (TypeError, ValueError):
+        safe_value = html.escape(str(user_id))
+        return f"<code>{safe_value}</code>"
+
+    safe_numeric = html.escape(str(numeric_id))
+    return f'<a href="tg://user?id={safe_numeric}"><code>{safe_numeric}</code></a>'
+
+
 def normalize_entity_type(entity_type: Any) -> str:
     """Return a lowercase representation for Telegram message entity types."""
 
@@ -991,7 +1007,7 @@ def build_dispatcher(
         lines = [
             f"<b>Moderacja – zgłoszenie #{snapshot['id']}</b>",
             f"Persona: <i>{persona_label}</i>",
-            f"Użytkownik: <code>{snapshot.get('submitted_by_user_id')}</code>",
+            f"Użytkownik: {_format_user_link(snapshot.get('submitted_by_user_id'))}",
             f"Czat: <code>{snapshot.get('submitted_chat_id')}</code>",
             f"Typ: <code>{media_type_enum.value}</code>",
             f"Zgłoszono: {created_at_text}",
@@ -1022,7 +1038,9 @@ def build_dispatcher(
         quoted_username = snapshot.get("quoted_username")
         quoted_name = snapshot.get("quoted_name")
         if quoted_user_id is not None:
-            lines.append(f"Cytowany użytkownik: <code>{quoted_user_id}</code>")
+            lines.append(
+                f"Cytowany użytkownik: {_format_user_link(quoted_user_id)}"
+            )
         if quoted_username:
             username_clean = quoted_username[1:] if quoted_username.startswith("@") else quoted_username
             if username_clean:
