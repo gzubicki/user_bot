@@ -155,6 +155,35 @@ class ModerationSettings(BaseModel):
     )
 
 
+class ResponseBehaviorSettings(BaseModel):
+    min_reply_delay_seconds: float = Field(
+        0.4,
+        ge=0.0,
+        validation_alias=AliasChoices(
+            _prefixed("MIN_REPLY_DELAY_SECONDS"),
+            "MIN_REPLY_DELAY_SECONDS",
+        ),
+    )
+    max_reply_delay_seconds: float = Field(
+        1.2,
+        ge=0.0,
+        validation_alias=AliasChoices(
+            _prefixed("MAX_REPLY_DELAY_SECONDS"),
+            "MAX_REPLY_DELAY_SECONDS",
+        ),
+    )
+
+    @field_validator("max_reply_delay_seconds")
+    @classmethod
+    def validate_delay_range(
+        cls, value: float, values: dict[str, float]
+    ) -> float:  # pragma: no cover - prosta walidacja
+        minimum = values.get("min_reply_delay_seconds")
+        if minimum is not None and value < minimum:
+            raise ValueError("MAX_REPLY_DELAY_SECONDS nie może być mniejsze niż MIN_REPLY_DELAY_SECONDS")
+        return value
+
+
 class LoggingSettings(BaseModel):
     level: str = Field(
         "INFO",
@@ -199,6 +228,7 @@ class Settings(BaseSettings):
     scheduler: SchedulerSettings
     moderation: ModerationSettings
     logging: LoggingSettings
+    response_behavior: ResponseBehaviorSettings = Field(default_factory=ResponseBehaviorSettings)
 
     @field_validator("admin_chat_id", mode="before")
     @classmethod
@@ -249,6 +279,7 @@ __all__ = [
     "SchedulerSettings",
     "ModerationSettings",
     "LoggingSettings",
+    "ResponseBehaviorSettings",
     "get_settings",
     "reload_settings",
 ]
