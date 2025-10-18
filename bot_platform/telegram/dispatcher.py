@@ -4,6 +4,8 @@ from __future__ import annotations
 import html
 import logging
 import re
+import asyncio
+import random
 from dataclasses import dataclass
 from datetime import UTC, datetime, timedelta
 from typing import Any, Iterable, Optional, Sequence
@@ -80,6 +82,28 @@ _CHAT_RESPONSE_TTL = timedelta(minutes=5)
 
 
 _SIGNATURE_WHITESPACE_RE = re.compile(r"\s+", re.UNICODE)
+
+
+def _get_reply_delay_bounds() -> tuple[float, float]:
+    behavior = getattr(get_settings(), "response_behavior", None)
+    if behavior is None:
+        return 0.0, 0.0
+    return behavior.min_reply_delay_seconds, behavior.max_reply_delay_seconds
+
+
+async def _sleep_before_reply() -> None:
+    min_delay, max_delay = _get_reply_delay_bounds()
+    if max_delay <= 0:
+        return
+    delay = random.uniform(min_delay, max_delay)
+    if delay <= 0:
+        return
+    await asyncio.sleep(delay)
+
+
+async def _answer_with_delay(message: Message, *args: Any, **kwargs: Any) -> Any:
+    await _sleep_before_reply()
+    return await message.answer(*args, **kwargs)
 
 
 def _clear_response_cache() -> None:
@@ -2834,6 +2858,8 @@ def build_dispatcher(
     async def _reply_with_quote(message: Message, quote: Quote) -> None:
         text_payload = (quote.text_content or "").strip() or "…"
 
+        await _sleep_before_reply()
+
         reply_target: Optional[Message] = None
         base_send_kwargs: dict[str, Any] = {"chat_id": message.chat.id}
 
@@ -3014,7 +3040,10 @@ def build_dispatcher(
             raise SkipHandler()
 
         if bot_id is None:
-            await message.answer("Ten bot nie jest jeszcze skonfigurowany – brak powiązanej persony.")
+            await _answer_with_delay(
+                message,
+                "Ten bot nie jest jeszcze skonfigurowany – brak powiązanej persony.",
+            )
             return
 
         persona_id: Optional[int] = None
@@ -3023,7 +3052,10 @@ def build_dispatcher(
             bot_record = await bots_service.get_bot_by_id(session, bot_id)
             persona = bot_record.persona if bot_record else None
             if persona is None:
-                await message.answer("Nie odnaleziono persony bota ani powiązanych cytatów.")
+                await _answer_with_delay(
+                    message,
+                    "Nie odnaleziono persony bota ani powiązanych cytatów.",
+                )
                 return
 
             persona_id = persona.id
@@ -3041,7 +3073,10 @@ def build_dispatcher(
             )
 
         if quote is None:
-            await message.answer("Niestety, nie znalazłem odpowiedniego cytatu.")
+            await _answer_with_delay(
+                message,
+                "Niestety, nie znalazłem odpowiedniego cytatu.",
+            )
             return
 
         chat_identifier = getattr(message.chat, "id", None)
@@ -3062,8 +3097,9 @@ def build_dispatcher(
                 )
 
             if alternative_quote is None:
-                await message.answer(
-                    "Niestety, nie znalazłem nowego cytatu do pokazania w tej chwili."
+                await _answer_with_delay(
+                    message,
+                    "Niestety, nie znalazłem nowego cytatu do pokazania w tej chwili.",
                 )
                 return
 
@@ -3087,8 +3123,9 @@ def build_dispatcher(
     @user_router.message()
     async def handle_user_submission(message: Message) -> None:
         if current_persona_id is None:
-            await message.answer(
-                "Ten bot nie jest jeszcze gotowy do przyjmowania wiadomości. Spróbuj ponownie później."
+            await _answer_with_delay(
+                message,
+                "Ten bot nie jest jeszcze gotowy do przyjmowania wiadomości. Spróbuj ponownie później.",
             )
             return
 
@@ -3102,7 +3139,10 @@ def build_dispatcher(
                 )
                 return
 
-            await message.answer("Nie udało się rozpoznać nadawcy wiadomości.")
+            await _answer_with_delay(
+                message,
+                "Nie udało się rozpoznać nadawcy wiadomości.",
+            )
             return
 
         logger.debug("Odebrano wiadomość od użytkownika: %s", _describe_message(message))
@@ -3130,7 +3170,8 @@ def build_dispatcher(
                 _describe_message(message),
                 user_text,
             )
-            await message.answer(
+            await _answer_with_delay(
+                message,
                 "Aby dodać ten cytat, przekaż (forwarduj) wiadomość zawierającą go bezpośrednio do bota. "
                 "Własnoręcznie wpisany tekst nie wystarczy.\n"
                 "Jeśli zaznaczysz kilka wiadomości i wyślesz je w jednym przekazaniu, bot spróbuje je scalić w sensowną wypowiedź.\n"
@@ -3151,7 +3192,10 @@ def build_dispatcher(
         if message.text:
             text_content = message.text.strip()
             if not text_content:
-                await message.answer("Wyślij proszę treść cytatu w wiadomości tekstowej.")
+                await _answer_with_delay(
+                    message,
+                    "Wyślij proszę treść cytatu w wiadomości tekstowej.",
+                )
                 logger.debug(
                     "Wiadomość %s została odrzucona – pusta treść tekstowa.",
                     _describe_message(message),
@@ -3174,8 +3218,9 @@ def build_dispatcher(
             if message.caption:
                 text_content = message.caption.strip()
         else:
-            await message.answer(
-                "Obecnie przyjmuję tylko tekst, zdjęcia lub nagrania audio. Wyślij cytat w jednym z tych formatów."
+            await _answer_with_delay(
+                message,
+                "Obecnie przyjmuję tylko tekst, zdjęcia lub nagrania audio. Wyślij cytat w jednym z tych formatów.",
             )
             logger.debug(
                 "Wiadomość %s została odrzucona – nieobsługiwany typ treści.",
@@ -3184,7 +3229,10 @@ def build_dispatcher(
             return
 
         if media_type_enum is None:
-            await message.answer("Nie udało się rozpoznać typu wiadomości.")
+            await _answer_with_delay(
+                message,
+                "Nie udało się rozpoznać typu wiadomości.",
+            )
             logger.debug(
                 "Wiadomość %s została odrzucona – nie rozpoznano typu wiadomości.",
                 _describe_message(message),
@@ -3302,7 +3350,7 @@ def build_dispatcher(
                 response_lines.append("")
                 response_lines.append(f"Podgląd: <i>{html.escape(preview[:200])}</i>")
 
-            await message.answer("\n".join(response_lines))
+            await _answer_with_delay(message, "\n".join(response_lines))
 
             if admin_chat_id and message.chat.id != admin_chat_id:
                 persona_name, _ = await _ensure_persona_details()
@@ -3333,8 +3381,9 @@ def build_dispatcher(
                 submission.id,
                 _describe_message(message),
             )
-            await message.answer(
-                "Dziękujemy! Zaktualizowaliśmy Twoje poprzednie zgłoszenie – całość trafiła do kolejki moderacji."
+            await _answer_with_delay(
+                message,
+                "Dziękujemy! Zaktualizowaliśmy Twoje poprzednie zgłoszenie – całość trafiła do kolejki moderacji.",
             )
         else:
             logger.info(
@@ -3342,7 +3391,10 @@ def build_dispatcher(
                 _describe_message(message),
                 submission.id,
             )
-            await message.answer("Dziękujemy! Twoja propozycja trafiła do kolejki moderacji.")
+            await _answer_with_delay(
+                message,
+                "Dziękujemy! Twoja propozycja trafiła do kolejki moderacji.",
+            )
 
         if admin_chat_id and message.chat.id != admin_chat_id:
             persona_name, _ = await _ensure_persona_details()
