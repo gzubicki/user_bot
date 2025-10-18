@@ -3070,6 +3070,7 @@ def build_dispatcher(
             await message.answer(
                 "Aby dodać ten cytat, przekaż (forwarduj) wiadomość zawierającą go bezpośrednio do bota. "
                 "Własnoręcznie wpisany tekst nie wystarczy.\n"
+                "Jeśli zaznaczysz kilka wiadomości i wyślesz je w jednym przekazaniu, bot spróbuje je scalić w sensowną wypowiedź.\n"
                 "Możesz też mieć takiego bota, o szczegóły pytaj na czacie kanału Polska Sztuka Wojny. "
                 "<a href=\"https://t.me/sztuka_wojny\">Polska Sztuka Wojny</a>.",
             )
