@@ -65,7 +65,7 @@ _MEMBERSHIP_EVENT_CONTENT_TYPES = frozenset(
 
 
 USER_SUBMISSION_MERGE_WINDOW = timedelta(seconds=2)
-QuoteSignature = tuple[int | None, str | None, str]
+QuoteSignature = tuple[str | None, str | None, str]
 
 
 @dataclass(slots=True)
@@ -76,6 +76,9 @@ class _ChatResponseCacheEntry:
 
 _CHAT_RESPONSE_CACHE: dict[tuple[object, object], _ChatResponseCacheEntry] = {}
 _CHAT_RESPONSE_TTL = timedelta(minutes=5)
+
+
+_SIGNATURE_WHITESPACE_RE = re.compile(r"\s+", re.UNICODE)
 
 
 def _clear_response_cache() -> None:
@@ -145,9 +148,29 @@ def _is_duplicate_chat_response(
     return True
 
 
+def _normalize_signature_text(text: str) -> str | None:
+    """Znormalizuj treść cytatu na potrzeby wykrywania duplikatów."""
+
+    if not text:
+        return None
+
+    collapsed = _SIGNATURE_WHITESPACE_RE.sub(" ", text)
+    normalized = collapsed.strip()
+    if not normalized:
+        return None
+    return normalized.casefold()
+
+
 def _build_quote_signature(quote: Quote) -> QuoteSignature:
-    text = (quote.text_content or "").strip()
-    return getattr(quote, "id", None), getattr(quote, "file_id", None), text
+    text_signature = _normalize_signature_text(getattr(quote, "text_content", "") or "")
+    raw_file_id = getattr(quote, "file_id", None) or ""
+    file_signature = raw_file_id.strip() or None
+    raw_media_type = getattr(quote, "media_type", MediaType.TEXT)
+    if isinstance(raw_media_type, MediaType):
+        media_type_value = raw_media_type.value
+    else:
+        media_type_value = str(raw_media_type)
+    return file_signature, text_signature, media_type_value
 
 
 def _format_user_link(user_id: Optional[int]) -> str:
