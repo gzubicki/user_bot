@@ -134,3 +134,78 @@ def test_list_all_quotes_with_personas_returns_ordered_quotes() -> None:
             assert [quote.persona.name for quote in quotes] == ["Alpha", "Beta", "Beta"]
 
     asyncio.run(scenario())
+
+
+def test_find_quotes_matching_payload_prefers_file_id() -> None:
+    async def scenario() -> None:
+        async with _session_scope() as session:
+            persona = Persona(name="Matcher", language="pl")
+            session.add(persona)
+            await session.flush()
+
+            text_quote = Quote(
+                persona_id=persona.id,
+                media_type=MediaType.TEXT,
+                text_content="Ala ma kota",
+                language="pl",
+            )
+            image_quote = Quote(
+                persona_id=persona.id,
+                media_type=MediaType.IMAGE,
+                file_id="photo-123",
+                text_content="Ilustracja",
+                language="pl",
+            )
+            session.add_all([text_quote, image_quote])
+            await session.flush()
+
+            matches = await quotes_service.find_quotes_matching_payload(
+                session,
+                text_content="Ala ma kota",
+                file_id="photo-123",
+                limit=3,
+            )
+
+            assert len(matches) == 1
+            match, origin = matches[0]
+            assert match.id == image_quote.id
+            assert origin == "file_id"
+
+    asyncio.run(scenario())
+
+
+def test_find_quotes_matching_payload_matches_normalized_text() -> None:
+    async def scenario() -> None:
+        async with _session_scope() as session:
+            persona = Persona(name="Tekst", language="pl")
+            session.add(persona)
+            await session.flush()
+
+            target = Quote(
+                persona_id=persona.id,
+                media_type=MediaType.TEXT,
+                text_content="To jest\nwyjątkowy\tcytat",
+                language="pl",
+            )
+            other = Quote(
+                persona_id=persona.id,
+                media_type=MediaType.TEXT,
+                text_content="Inna treść",
+                language="pl",
+            )
+            session.add_all([target, other])
+            await session.flush()
+
+            matches = await quotes_service.find_quotes_matching_payload(
+                session,
+                text_content="  to  jest wyjątkowy   cytat  ",
+                file_id=None,
+                limit=5,
+            )
+
+            assert len(matches) == 1
+            match, origin = matches[0]
+            assert match.id == target.id
+            assert origin == "text"
+
+    asyncio.run(scenario())

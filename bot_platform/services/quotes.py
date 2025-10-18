@@ -9,6 +9,7 @@ from datetime import datetime
 from typing import Any, Optional, Sequence
 
 from sqlalchemy import func, select
+from sqlalchemy.exc import OperationalError
 from sqlalchemy.ext.asyncio import AsyncSession
 from sqlalchemy.orm import selectinload
 
@@ -465,6 +466,75 @@ async def create_quote_from_submission(
     return quote
 
 
+async def find_quotes_matching_payload(
+    session: AsyncSession,
+    *,
+    text_content: Optional[str] = None,
+    file_id: Optional[str] = None,
+    limit: int = 5,
+) -> list[tuple[Quote, str]]:
+    """Wyszukaj cytaty dopasowane do treści lub identyfikatora pliku."""
+
+    max_results = max(int(limit or 0), 0)
+    if max_results <= 0:
+        return []
+
+    async def _run_query(condition: Any, match_type: str) -> list[tuple[Quote, str]]:
+        stmt = (
+            select(Quote)
+            .options(selectinload(Quote.persona))
+            .where(condition)
+            .order_by(Quote.id.asc())
+            .limit(max_results)
+        )
+        result = await session.execute(stmt)
+        quotes = list(result.scalars().all())
+        return [(quote, match_type) for quote in quotes]
+
+    if file_id:
+        cleaned_file_id = file_id.strip()
+        if cleaned_file_id:
+            file_matches = await _run_query(Quote.file_id == cleaned_file_id, "file_id")
+            if file_matches:
+                logger.debug(
+                    "Znaleziono %s cytatów na podstawie identyfikatora pliku",
+                    len(file_matches),
+                )
+                return file_matches
+
+    if text_content:
+        normalized = _normalize_quote_text(text_content)
+        if normalized:
+            normalized_expression = _normalized_quote_text_expression()
+            try:
+                text_matches = await _run_query(normalized_expression == normalized, "text")
+            except OperationalError:
+                logger.debug(
+                    "Baza nie obsługuje regexp_replace – filtrujemy dopasowania tekstowe w pamięci."
+                )
+                stmt = (
+                    select(Quote)
+                    .options(selectinload(Quote.persona))
+                    .where(Quote.text_content.is_not(None))
+                )
+                result = await session.execute(stmt)
+                text_candidates = [
+                    quote
+                    for quote in result.scalars().all()
+                    if _normalize_quote_text(quote.text_content or "") == normalized
+                ][:max_results]
+                text_matches = [(quote, "text") for quote in text_candidates]
+            if text_matches:
+                logger.debug(
+                    "Znaleziono %s cytatów na podstawie treści tekstowej",
+                    len(text_matches),
+                )
+                return text_matches
+
+    logger.debug("Brak dopasowań cytatów dla przekazanej treści/plików")
+    return []
+
+
 async def aggregate_quote_stats(session: AsyncSession) -> dict[int, PersonaQuoteStats]:
     """Policz cytaty według persony i rodzaju zasobu."""
 
@@ -519,11 +589,12 @@ __all__ = [
     "random_quote",
     "get_quote_by_id",
     "delete_quote",
+    "find_exact_duplicate",
+    "find_quotes_matching_payload",
     "find_quotes_by_language",
     "search_quotes_by_relevance",
     "select_relevant_quote",
     "create_quote_from_submission",
-    "find_exact_duplicate",
     "aggregate_quote_stats",
     "list_all_quotes_with_personas",
 ]
