@@ -1179,6 +1179,102 @@ def build_dispatcher(
 
         await message.answer("\n".join(lines))
 
+    @admin_router.message(lambda message: _has_forward_metadata(message))
+    async def handle_forwarded_quote_lookup(message: Message, state: FSMContext) -> None:
+        current_state = await state.get_state()
+        if current_state is not None:
+            logger.debug(
+                "Pomijamy przekazaną wiadomość %s – aktywny stan FSM: %s",
+                _describe_message(message),
+                current_state,
+            )
+            return
+
+        forward_from = getattr(message, "forward_from", None)
+        forward_origin = getattr(message, "forward_origin", None)
+        forward_from_chat = getattr(message, "forward_from_chat", None)
+
+        forwarded_from_bot = False
+        if forward_from is not None and getattr(forward_from, "is_bot", False):
+            forwarded_from_bot = True
+        else:
+            origin_user = getattr(forward_origin, "sender_user", None)
+            if origin_user is not None and getattr(origin_user, "is_bot", False):
+                forwarded_from_bot = True
+            origin_chat = getattr(forward_origin, "sender_chat", None)
+            if origin_chat is None:
+                origin_chat = forward_from_chat
+            if origin_chat is not None and getattr(origin_chat, "type", None) == "bot":
+                forwarded_from_bot = True
+
+        if not forwarded_from_bot:
+            logger.debug(
+                "Pomijamy przekazaną wiadomość %s – brak potwierdzenia, że pochodzi od bota.",
+                _describe_message(message),
+            )
+            return
+
+        text_payload = (message.text or message.caption or "").strip()
+        file_id: Optional[str] = None
+        if message.photo:
+            file_id = message.photo[-1].file_id
+        elif message.voice:
+            file_id = message.voice.file_id
+        elif message.audio:
+            file_id = message.audio.file_id
+
+        if not text_payload and not file_id:
+            logger.debug(
+                "Przekazana wiadomość %s nie zawiera treści ani obsługiwanego pliku.",
+                _describe_message(message),
+            )
+            return
+
+        async with get_session() as session:
+            matches = await quotes_service.find_quotes_matching_payload(
+                session,
+                text_content=text_payload or None,
+                file_id=file_id,
+                limit=5,
+            )
+
+        if not matches:
+            logger.info(
+                "Nie znaleziono cytatów odpowiadających przekazanej wiadomości: %s",
+                _describe_message(message),
+            )
+            await message.reply(
+                "Nie znalazłem w bazie cytatu odpowiadającego tej wiadomości."
+            )
+            return
+
+        match_labels = {"text": "treści", "file_id": "identyfikatora pliku"}
+        lines = ["🔎 Odnalazłem pasujące cytaty:"]
+
+        for quote, match_type in matches:
+            persona_name = (
+                quote.persona.name if quote.persona and quote.persona.name else str(quote.persona_id)
+            )
+            media_value = (
+                quote.media_type.value
+                if isinstance(quote.media_type, MediaType)
+                else str(quote.media_type)
+            )
+            reason = match_labels.get(match_type, match_type)
+            lines.append(
+                "• ID: <code>{id}</code> (persona: <i>{persona}</i>, typ: <code>{media}</code>, na podstawie {reason})".format(
+                    id=quote.id,
+                    persona=html.escape(persona_name),
+                    media=html.escape(media_value),
+                    reason=reason,
+                )
+            )
+            preview = (quote.text_content or "").strip()
+            if preview:
+                lines.append(f"  <blockquote>{html.escape(preview[:200])}</blockquote>")
+
+        await message.reply("\n".join(lines))
+
     @admin_router.callback_query(F.data == "menu:main")
     async def handle_back_to_menu(callback: CallbackQuery, state: FSMContext) -> None:
         await _send_menu(callback, state, intro="Menu główne")
