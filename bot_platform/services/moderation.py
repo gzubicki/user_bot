@@ -1,41 +1,79 @@
 """Moderation workflow utilities."""
 from __future__ import annotations
 
-from datetime import datetime
+from datetime import datetime, timedelta
 from typing import Iterable, Optional
 
-from sqlalchemy import select, update
+from sqlalchemy import delete, func, select, update
 from sqlalchemy.ext.asyncio import AsyncSession
 from sqlalchemy.orm import selectinload
 
-from ..models import MediaType, ModerationAction, ModerationStatus, Submission
+from ..logging_config import get_logger
+from ..models import (
+    MediaType,
+    ModerationAction,
+    ModerationStatus,
+    Persona,
+    Submission,
+)
 
 
-async def list_pending_submissions(session: AsyncSession, *, persona_id: Optional[int] = None) -> list[Submission]:
+logger = get_logger(__name__)
+
+
+async def list_pending_submissions(
+    session: AsyncSession,
+    *,
+    persona_id: Optional[int] = None,
+    limit: Optional[int] = None,
+    exclude_ids: Optional[Iterable[int]] = None,
+) -> list[Submission]:
     stmt = (
         select(Submission)
         .options(
-            selectinload(Submission.persona).selectinload("identities")
+            selectinload(Submission.persona).selectinload(Persona.identities)
         )
         .where(Submission.status == ModerationStatus.PENDING)
     )
     if persona_id is not None:
         stmt = stmt.where(Submission.persona_id == persona_id)
+    if exclude_ids:
+        excluded = [int(value) for value in exclude_ids]
+        if excluded:
+            stmt = stmt.where(~Submission.id.in_(excluded))
     stmt = stmt.order_by(Submission.created_at.asc())
+    if limit is not None:
+        stmt = stmt.limit(limit)
     result = await session.execute(stmt)
-    return list(result.scalars().all())
+    submissions = list(result.scalars().all())
+    logger.info(
+        "Pobrano %s zgłoszeń oczekujących na moderację (persona_id=%s, limit=%s)",
+        len(submissions),
+        persona_id,
+        limit,
+    )
+    return submissions
 
 
 async def get_submission_by_id(session: AsyncSession, submission_id: int) -> Optional[Submission]:
     stmt = (
         select(Submission)
         .options(
-            selectinload(Submission.persona).selectinload("identities")
+            selectinload(Submission.persona).selectinload(Persona.identities)
         )
         .where(Submission.id == submission_id)
     )
     result = await session.execute(stmt)
-    return result.scalars().first()
+    submission = result.scalars().first()
+    if submission is None:
+        logger.warning("Nie znaleziono zgłoszenia o ID=%s", submission_id)
+    else:
+        logger.debug(
+            "Odczytano zgłoszenie ID=%s w statusie %s",
+            submission.id,
+            submission.status,
+        )
+    return submission
 
 
 async def create_submission(
@@ -46,6 +84,9 @@ async def create_submission(
     submitted_chat_id: int,
     submitted_by_username: Optional[str] = None,
     submitted_by_name: Optional[str] = None,
+    quoted_user_id: Optional[int] = None,
+    quoted_username: Optional[str] = None,
+    quoted_name: Optional[str] = None,
     media_type: MediaType,
     text_content: Optional[str] = None,
     file_id: Optional[str] = None,
@@ -57,6 +98,9 @@ async def create_submission(
         submitted_chat_id=submitted_chat_id,
         submitted_by_username=submitted_by_username,
         submitted_by_name=submitted_by_name,
+        quoted_user_id=quoted_user_id,
+        quoted_username=quoted_username,
+        quoted_name=quoted_name,
         media_type=media_type.value if isinstance(media_type, MediaType) else media_type,
         text_content=text_content,
         file_id=file_id,
@@ -66,6 +110,74 @@ async def create_submission(
     session.add(submission)
     await session.flush()
     await session.refresh(submission)
+
+    if submission.persona_id is not None:
+        persona_stmt = (
+            select(Persona)
+            .options(selectinload(Persona.identities))
+            .where(Persona.id == submission.persona_id)
+        )
+        persona_result = await session.execute(persona_stmt)
+        submission.persona = persona_result.scalars().first()
+
+    logger.info(
+        "Dodano nowe zgłoszenie ID=%s dla persony ID=%s (media_type=%s)",
+        submission.id,
+        submission.persona_id,
+        submission.media_type,
+    )
+    return submission
+
+
+async def find_recent_text_submission(
+    session: AsyncSession,
+    *,
+    persona_id: int,
+    submitted_by_user_id: int,
+    submitted_chat_id: int,
+    max_age: timedelta,
+    lock_for_update: bool = False,
+) -> Optional[Submission]:
+    """Return the newest pending text submission within the provided timeframe.
+
+    Gdy ``lock_for_update`` ustawione jest na ``True``, zapytanie blokuje odczytany
+    wiersz do czasu zatwierdzenia transakcji. Pozwala to uniknąć utraty fragmentów
+    treści podczas scalania kilku wiadomości użytkownika w jedno zgłoszenie.
+    """
+
+    threshold = datetime.utcnow() - max_age
+    stmt = (
+        select(Submission)
+        .options(selectinload(Submission.persona).selectinload(Persona.identities))
+        .where(
+            Submission.persona_id == persona_id,
+            Submission.submitted_by_user_id == submitted_by_user_id,
+            Submission.submitted_chat_id == submitted_chat_id,
+            Submission.status == ModerationStatus.PENDING,
+            Submission.media_type == MediaType.TEXT,
+            Submission.file_id.is_(None),
+            Submission.created_at >= threshold,
+        )
+        .order_by(Submission.created_at.desc())
+        .limit(1)
+    )
+    if lock_for_update:
+        stmt = stmt.with_for_update()
+    result = await session.execute(stmt)
+    submission = result.scalars().first()
+    if submission:
+        logger.debug(
+            "Znaleziono ostatnie zgłoszenie tekstowe #%s do aktualizacji (persona_id=%s, user_id=%s).",
+            submission.id,
+            persona_id,
+            submitted_by_user_id,
+        )
+    else:
+        logger.debug(
+            "Brak świeżych zgłoszeń tekstowych do połączenia (persona_id=%s, user_id=%s).",
+            persona_id,
+            submitted_by_user_id,
+        )
     return submission
 
 
@@ -96,6 +208,9 @@ async def decide_submission(
     )
     session.add(moderation_action)
     await session.flush()
+    logger.info(
+        "Zaktualizowano status zgłoszenia ID=%s na %s", submission.id, submission.status
+    )
     return submission
 
 
@@ -111,13 +226,52 @@ async def bulk_mark_submissions(
         .values(status=status, decided_at=datetime.utcnow())
     )
     result = await session.execute(stmt)
-    return result.rowcount or 0
+    affected = result.rowcount or 0
+    logger.info(
+        "Masowo zaktualizowano %s zgłoszeń na status %s", affected, status
+    )
+    return affected
+
+
+async def purge_pending_submissions(
+    session: AsyncSession, *, persona_id: Optional[int] = None
+) -> int:
+    """Remove all pending submissions, optionally limited to a persona."""
+
+    stmt = delete(Submission).where(Submission.status == ModerationStatus.PENDING)
+    if persona_id is not None:
+        stmt = stmt.where(Submission.persona_id == persona_id)
+    result = await session.execute(stmt)
+    removed = result.rowcount or 0
+    logger.warning(
+        "Usunięto %s oczekujących zgłoszeń (persona_id=%s)", removed, persona_id
+    )
+    return removed
+
+
+async def count_pending_submissions(
+    session: AsyncSession, *, persona_id: Optional[int] = None
+) -> int:
+    stmt = select(func.count()).select_from(Submission).where(
+        Submission.status == ModerationStatus.PENDING
+    )
+    if persona_id is not None:
+        stmt = stmt.where(Submission.persona_id == persona_id)
+    result = await session.execute(stmt)
+    total = int(result.scalar_one() or 0)
+    logger.debug(
+        "W kolejce oczekuje %s zgłoszeń (persona_id=%s)", total, persona_id
+    )
+    return total
 
 
 __all__ = [
     "create_submission",
+    "find_recent_text_submission",
     "list_pending_submissions",
     "get_submission_by_id",
     "decide_submission",
     "bulk_mark_submissions",
+    "purge_pending_submissions",
+    "count_pending_submissions",
 ]

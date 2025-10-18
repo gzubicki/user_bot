@@ -1,20 +1,46 @@
 """Aiogram dispatcher factory and admin chat handlers."""
 from __future__ import annotations
 
-import re
 import html
-from datetime import datetime
+import logging
+import re
 from dataclasses import dataclass
+from datetime import UTC, datetime, timedelta
 from typing import Any, Iterable, Optional
+
+from sqlalchemy.ext.asyncio import AsyncSession
 
 from aiogram import Bot, Dispatcher, F, Router
 from aiogram.client.default import DefaultBotProperties
-from aiogram.enums import ParseMode
+from aiogram.enums import MessageEntityType, ParseMode
 from aiogram.exceptions import TelegramBadRequest, TelegramNetworkError, TelegramUnauthorizedError
 from aiogram.filters import Command, CommandStart
+from aiogram.filters.command import CommandObject
 from aiogram.fsm.context import FSMContext
-from aiogram.types import CallbackQuery, InlineKeyboardMarkup, Message
+from aiogram.types import (
+    BotCommand,
+    BotCommandScopeAllPrivateChats,
+    BotCommandScopeChat,
+    CallbackQuery,
+    InlineKeyboardMarkup,
+    Message,
+)
 from aiogram.utils.keyboard import InlineKeyboardBuilder
+
+
+try:  # pragma: no cover - zależne od wersji aiogram
+    from aiogram.dispatcher.event.bases import SkipHandler
+except ImportError:  # pragma: no cover - fallback dla innych wersji
+    try:
+        from aiogram.exceptions import SkipHandler  # type: ignore[attr-defined]
+    except ImportError:
+        try:
+            from aiogram.handlers import SkipHandler  # type: ignore[attr-defined]
+        except ImportError:
+            class SkipHandler(Exception):
+                """Zapasowy wyjątek zastępujący SkipHandler z aiogram."""
+
+                pass
 
 from ..config import get_settings
 from ..database import get_session
@@ -24,7 +50,218 @@ from ..services import identities as identities_service
 from ..services import moderation as moderation_service
 from ..services import personas as personas_service
 from ..services import quotes as quotes_service
-from .states import AddBotStates, EditBotStates, ModerationStates
+from .states import AddBotStates, EditBotStates, IdentityStates, ModerationStates
+
+
+logger = logging.getLogger(__name__)
+
+
+_MEMBERSHIP_EVENT_CONTENT_TYPES = frozenset(
+    {
+        "new_chat_members",
+        "left_chat_member",
+        "chat_member_updated",
+    }
+)
+
+
+USER_SUBMISSION_MERGE_WINDOW = timedelta(seconds=2)
+QuoteSignature = tuple[str | None, str | None, str]
+
+
+@dataclass(slots=True)
+class _ChatResponseCacheEntry:
+    signature: QuoteSignature
+    expires_at: datetime
+
+
+_CHAT_RESPONSE_CACHE: dict[tuple[object, object], _ChatResponseCacheEntry] = {}
+_CHAT_RESPONSE_TTL = timedelta(minutes=5)
+
+
+_SIGNATURE_WHITESPACE_RE = re.compile(r"\s+", re.UNICODE)
+
+
+def _clear_response_cache() -> None:
+    """Usuń wszystkie zapamiętane odpowiedzi (pomocnicze w testach)."""
+
+    _CHAT_RESPONSE_CACHE.clear()
+
+
+def _safe_normalize_identifier(value: object) -> object:
+    if value is None:
+        return None
+    try:
+        return int(value)
+    except (TypeError, ValueError):
+        return value
+
+
+def _chat_cache_key(chat_id: object, thread_id: object) -> tuple[object, object]:
+    return _safe_normalize_identifier(chat_id), _safe_normalize_identifier(thread_id)
+
+
+def _ensure_utc(dt: datetime) -> datetime:
+    if dt.tzinfo is None:
+        return dt.replace(tzinfo=UTC)
+    return dt.astimezone(UTC)
+
+
+def _prune_expired_chat_cache(now: datetime) -> None:
+    normalized_now = _ensure_utc(now)
+    expired_keys = [key for key, entry in _CHAT_RESPONSE_CACHE.items() if entry.expires_at <= normalized_now]
+    for key in expired_keys:
+        _CHAT_RESPONSE_CACHE.pop(key, None)
+
+
+def _remember_chat_response(
+    chat_id: object,
+    thread_id: object,
+    signature: QuoteSignature,
+    *,
+    now: datetime | None = None,
+) -> None:
+    reference_time = _ensure_utc(now) if now is not None else datetime.now(UTC)
+    _prune_expired_chat_cache(reference_time)
+    key = _chat_cache_key(chat_id, thread_id)
+    _CHAT_RESPONSE_CACHE[key] = _ChatResponseCacheEntry(
+        signature=signature,
+        expires_at=reference_time + _CHAT_RESPONSE_TTL,
+    )
+
+
+def _is_duplicate_chat_response(
+    chat_id: object,
+    thread_id: object,
+    signature: QuoteSignature,
+    *,
+    now: datetime | None = None,
+) -> bool:
+    reference_time = _ensure_utc(now) if now is not None else datetime.now(UTC)
+    _prune_expired_chat_cache(reference_time)
+    key = _chat_cache_key(chat_id, thread_id)
+    entry = _CHAT_RESPONSE_CACHE.get(key)
+    if entry is None:
+        return False
+    if entry.signature != signature:
+        return False
+    entry.expires_at = reference_time + _CHAT_RESPONSE_TTL
+    return True
+
+
+def _normalize_signature_text(text: str) -> str | None:
+    """Znormalizuj treść cytatu na potrzeby wykrywania duplikatów."""
+
+    if not text:
+        return None
+
+    collapsed = _SIGNATURE_WHITESPACE_RE.sub(" ", text)
+    normalized = collapsed.strip()
+    if not normalized:
+        return None
+    return normalized.casefold()
+
+
+def _build_quote_signature(quote: Quote) -> QuoteSignature:
+    text_signature = _normalize_signature_text(getattr(quote, "text_content", "") or "")
+    raw_file_id = getattr(quote, "file_id", None) or ""
+    file_signature = raw_file_id.strip() or None
+    raw_media_type = getattr(quote, "media_type", MediaType.TEXT)
+    if isinstance(raw_media_type, MediaType):
+        media_type_value = raw_media_type.value
+    else:
+        media_type_value = str(raw_media_type)
+    return file_signature, text_signature, media_type_value
+
+
+def _format_user_link(user_id: Optional[int]) -> str:
+    """Zwróć link do profilu Telegramu lub czytelny fallback dla braku ID."""
+
+    if user_id is None:
+        return "<code>—</code>"
+
+    try:
+        numeric_id = int(user_id)
+    except (TypeError, ValueError):
+        safe_value = html.escape(str(user_id))
+        return f"<code>{safe_value}</code>"
+
+    safe_numeric = html.escape(str(numeric_id))
+    return f'<a href="tg://user?id={safe_numeric}"><code>{safe_numeric}</code></a>'
+
+
+def normalize_entity_type(entity_type: Any) -> str:
+    """Return a lowercase representation for Telegram message entity types."""
+
+    if isinstance(entity_type, MessageEntityType):
+        return entity_type.value
+    if isinstance(entity_type, str):
+        return entity_type.lower()
+    return str(entity_type).lower()
+
+
+def is_command_addressed_to_bot(command: str, normalized_username: Optional[str]) -> bool:
+    """Check whether a bot command targets the current bot.
+
+    Telegram dostarcza treść komendy jako osobną encję – `command` zawiera
+    wyłącznie fragment od ukośnika do końca komendy (bez parametrów). W grupach
+    użytkownicy mogą wpisywać komendy bez dopisku `@bot`, dlatego traktujemy
+    brak sufiksu jako komendę skierowaną do bieżącego bota. Jeżeli jednak
+    pojawi się sufiks, porównujemy go z nazwą użytkownika bota, by uniknąć
+    reagowania na cudze komendy.
+    """
+
+    normalized = command.strip().lower()
+    if not normalized.startswith("/"):
+        return False
+
+    if "@" not in normalized:
+        return True
+
+    suffix = normalized.split("@", 1)[1]
+    if not suffix:
+        return True
+    if normalized_username is None:
+        return False
+    return suffix == normalized_username
+
+
+def contains_explicit_mention(text: str, username: Optional[str]) -> bool:
+    """Return True if `@username` appears in text as a standalone mention."""
+
+    if not text or not username:
+        return False
+
+    pattern = re.compile(rf"(?<![\w@])@{re.escape(username)}(?![\w@])", re.IGNORECASE)
+    return pattern.search(text) is not None
+
+
+def _merge_submission_text(existing: Optional[str], incoming: str) -> str:
+    """Append ``incoming`` to ``existing`` using a newline separator."""
+
+    existing_clean = (existing or "").strip()
+    incoming_clean = (incoming or "").strip()
+    if not existing_clean:
+        return incoming_clean
+    if not incoming_clean:
+        return existing_clean
+    return f"{existing_clean}\n{incoming_clean}"
+
+
+def _is_expired_callback_query_error(error: TelegramBadRequest) -> bool:
+    message = getattr(error, "message", None) or str(error)
+    normalized = message.lower()
+    return "query is too old" in normalized or "query id is invalid" in normalized
+
+
+async def _safe_callback_answer(callback: CallbackQuery, *args: Any, **kwargs: Any) -> None:
+    try:
+        await callback.answer(*args, **kwargs)
+    except TelegramBadRequest as exc:
+        if _is_expired_callback_query_error(exc):
+            logger.debug("Ignoring expired callback query %s: %s", callback.id, exc)
+            return
+        raise
 
 
 @dataclass(slots=True)
@@ -41,7 +278,9 @@ def _main_menu_keyboard() -> InlineKeyboardBuilder:
     builder = InlineKeyboardBuilder()
     builder.button(text="➕ Dodaj bota", callback_data="menu:add_bot")
     builder.button(text="📋 Lista botów", callback_data="menu:list_bots")
+    builder.button(text="🧾 Lista cytatów", callback_data="menu:list_quotes")
     builder.button(text="✏️ Edytuj bota", callback_data="menu:edit_bot")
+    builder.button(text="🆔 Tożsamości", callback_data="menu:identities")
     builder.button(text="🗳 Moderacja", callback_data="menu:moderation")
     builder.button(text="🔁 Odśwież tokeny", callback_data="menu:refresh_tokens")
     builder.adjust(1)
@@ -98,6 +337,74 @@ def build_dispatcher(
     current_persona_id = persona_id
     persona_cache: dict[str, Optional[str]] = {"name": None, "language": None}
 
+    def _format_identity_summary(active: int, total: int) -> str:
+        if total <= 0:
+            return "brak tożsamości"
+        inactive = max(total - active, 0)
+        if inactive == 0:
+            return f"{active} aktywnych"
+        return f"{active} aktywnych, {inactive} wyłączonych"
+
+    def _format_resource_summary(
+        summary: Optional[quotes_service.PersonaQuoteStats],
+    ) -> tuple[str, int]:
+        if summary is None or summary.total_quotes <= 0:
+            return "brak zasobów", 0
+
+        known_labels = {
+            MediaType.TEXT: "teksty",
+            MediaType.IMAGE: "obrazy",
+            MediaType.AUDIO: "audio",
+        }
+        parts: list[str] = []
+        seen: set[MediaType] = set()
+        for media_type, label in known_labels.items():
+            raw_count = summary.media_counts.get(media_type, 0)
+            count = int(raw_count or 0)
+            if count > 0:
+                parts.append(f"{label}: {count}")
+                seen.add(media_type)
+
+        for media_type, raw_count in summary.media_counts.items():
+            if media_type in seen:
+                continue
+            count = int(raw_count or 0)
+            if count <= 0:
+                continue
+            if isinstance(media_type, MediaType):
+                label = media_type.value
+            else:
+                label = str(media_type)
+            parts.append(f"{label}: {count}")
+
+        return (", ".join(parts) if parts else "brak zasobów", summary.total_quotes)
+
+    def _truncate_preview_text(text: str, limit: int = 160) -> str:
+        normalized = re.sub(r"\s+", " ", text or "").strip()
+        if len(normalized) <= limit:
+            return normalized
+        return normalized[: limit - 1].rstrip() + "…"
+
+    def _format_quote_preview(quote: Quote) -> str:
+        media_type = quote.media_type
+        if not isinstance(media_type, MediaType):
+            try:
+                media_type = MediaType(str(media_type))
+            except ValueError:
+                media_type = MediaType.TEXT
+
+        if media_type == MediaType.TEXT:
+            preview = _truncate_preview_text(quote.text_content or "")
+            if not preview:
+                return "<i>[pusty tekst]</i>"
+            return html.escape(preview)
+        if media_type == MediaType.IMAGE:
+            return "<i>[obraz]</i>"
+        if media_type == MediaType.AUDIO:
+            return "<i>[audio]</i>"
+        return f"<i>[{html.escape(str(media_type))}]</i>"
+    MAX_PENDING_PREVIEW = 20
+
     async def _ensure_persona_details() -> tuple[Optional[str], Optional[str]]:
         if current_persona_id is None:
             return None, None
@@ -140,7 +447,377 @@ def build_dispatcher(
             else None,
             "available": available,
             "partial": partial,
+            "candidate_user_id": result.candidate_user_id,
+            "candidate_username": result.candidate_username,
+            "candidate_display_name": result.candidate_display_name,
         }
+
+    async def _build_duplicate_snapshot(
+        session: AsyncSession, submission: Submission
+    ) -> dict[str, Any]:
+        persona_id = submission.persona_id
+        if persona_id is None:
+            return {"checked": False, "exact": None, "match_type": None}
+
+        try:
+            media_type_enum = (
+                submission.media_type
+                if isinstance(submission.media_type, MediaType)
+                else MediaType(submission.media_type)
+            )
+        except ValueError:
+            media_type_enum = MediaType.TEXT
+
+        duplicate_result = await quotes_service.find_exact_duplicate(
+            session,
+            persona_id=persona_id,
+            media_type=media_type_enum,
+            text_content=submission.text_content,
+            file_id=submission.file_id,
+            file_hash=submission.file_hash,
+        )
+
+        if duplicate_result is None:
+            return {"checked": True, "exact": None, "match_type": None}
+
+        duplicate_quote, match_type = duplicate_result
+        text_preview = (duplicate_quote.text_content or "").strip() or None
+        media_value = (
+            duplicate_quote.media_type.value
+            if isinstance(duplicate_quote.media_type, MediaType)
+            else duplicate_quote.media_type
+        )
+
+        return {
+            "checked": True,
+            "match_type": match_type,
+            "exact": {
+                "id": duplicate_quote.id,
+                "media_type": media_value,
+                "language": duplicate_quote.language,
+                "text_preview": text_preview,
+                "file_id": duplicate_quote.file_id,
+            },
+        }
+
+    async def _build_duplicate_snapshot(
+        session: AsyncSession, submission: Submission
+    ) -> dict[str, Any]:
+        persona_id = submission.persona_id
+        if persona_id is None:
+            return {"checked": False, "exact": None, "match_type": None}
+
+        try:
+            media_type_enum = (
+                submission.media_type
+                if isinstance(submission.media_type, MediaType)
+                else MediaType(submission.media_type)
+            )
+        except ValueError:
+            media_type_enum = MediaType.TEXT
+
+        duplicate_result = await quotes_service.find_exact_duplicate(
+            session,
+            persona_id=persona_id,
+            media_type=media_type_enum,
+            text_content=submission.text_content,
+            file_id=submission.file_id,
+            file_hash=submission.file_hash,
+        )
+
+        if duplicate_result is None:
+            return {"checked": True, "exact": None, "match_type": None}
+
+        duplicate_quote, match_type = duplicate_result
+        text_preview = (duplicate_quote.text_content or "").strip() or None
+        media_value = (
+            duplicate_quote.media_type.value
+            if isinstance(duplicate_quote.media_type, MediaType)
+            else duplicate_quote.media_type
+        )
+
+        return {
+            "checked": True,
+            "match_type": match_type,
+            "exact": {
+                "id": duplicate_quote.id,
+                "media_type": media_value,
+                "language": duplicate_quote.language,
+                "text_preview": text_preview,
+                "file_id": duplicate_quote.file_id,
+            },
+        }
+
+    def _format_queue_summary_line(snapshot: dict[str, Any]) -> str:
+        persona_value = snapshot.get("persona_name") or snapshot.get("persona_id") or "—"
+        persona_label = html.escape(str(persona_value))
+        media_type_value = snapshot.get("media_type", MediaType.TEXT.value)
+        try:
+            media_type_enum = MediaType(media_type_value)
+        except ValueError:
+            media_type_enum = MediaType.TEXT
+        created_at_raw = snapshot.get("created_at")
+        created_at_text = "?"
+        if created_at_raw:
+            try:
+                created_at_dt = datetime.fromisoformat(created_at_raw)
+                created_at_text = created_at_dt.strftime("%Y-%m-%d %H:%M")
+            except ValueError:
+                created_at_text = str(created_at_raw)
+        return (
+            f"• #{snapshot.get('id')} – typ: <code>{html.escape(media_type_enum.value)}</code>, "
+            f"persona: <i>{persona_label}</i>, zgłoszono: {created_at_text}"
+        )
+
+    def _compose_queue_summary_message(
+        snapshots: list[dict[str, Any]], total_pending: int
+    ) -> tuple[str, Optional[InlineKeyboardMarkup]]:
+        if total_pending == 0:
+            return (
+                "📭 W kolejce moderacyjnej nie ma żadnych zgłoszeń.",
+                _main_menu_keyboard().as_markup(),
+            )
+
+        lines = [f"📊 W kolejce moderacyjnej czeka {total_pending} zgłoszeń."]
+        if total_pending > MAX_PENDING_PREVIEW:
+            lines.append(
+                f"Prezentuję {MAX_PENDING_PREVIEW} najstarszych wpisów oczekujących na moderację."
+            )
+        else:
+            lines.append("Prezentuję wszystkie oczekujące wpisy.")
+
+        if snapshots:
+            lines.append("")
+            lines.append("📝 Najstarsze zgłoszenia:")
+            for snapshot in snapshots:
+                lines.append(_format_queue_summary_line(snapshot))
+
+        return "\n".join(lines), None
+
+    async def _prompt_identity_persona_choice(
+        target: Message | CallbackQuery,
+        state: FSMContext,
+        *,
+        intro: Optional[str] = None,
+    ) -> None:
+        async with get_session() as session:
+            persona_stats = await personas_service.list_personas_with_identity_stats(session)
+
+        if not persona_stats:
+            message_text = (
+                "Brak dostępnych person. Dodaj nowego bota lub personę, aby móc zarządzać tożsamościami."
+            )
+            keyboard = _main_menu_keyboard().as_markup()
+            await state.clear()
+            if isinstance(target, CallbackQuery):
+                await _safe_callback_answer(target)
+                if target.message:
+                    await target.message.answer(message_text, reply_markup=keyboard)
+            else:
+                await target.answer(message_text, reply_markup=keyboard)
+            return
+
+        await state.set_state(IdentityStates.choosing_persona)
+
+        builder = InlineKeyboardBuilder()
+        for summary in persona_stats:
+            persona = summary.persona
+            label = persona.name or f"ID {persona.id}"
+            hint = _format_identity_summary(summary.active_identities, summary.total_identities)
+            builder.button(
+                text=f"{label} · {hint}", callback_data=f"identity:persona:{persona.id}"
+            )
+        builder.button(text="⬅️ Menu główne", callback_data="identity:cancel")
+        builder.adjust(1)
+
+        lines = []
+        if intro:
+            lines.append(intro)
+        lines.append("Wybierz personę, której tożsamości chcesz aktualizować.")
+
+        if isinstance(target, CallbackQuery):
+            await _safe_callback_answer(target)
+            if target.message:
+                await target.message.answer("\n".join(lines), reply_markup=builder.as_markup())
+        else:
+            await target.answer("\n".join(lines), reply_markup=builder.as_markup())
+
+    def _parse_identity_payload(text: str) -> Optional[dict[str, Optional[str | int]]]:
+        content = (text or "").strip()
+        if not content:
+            return None
+
+        user_id: Optional[int] = None
+        username: Optional[str] = None
+        display_name: Optional[str] = None
+
+        fragments = [segment.strip() for segment in re.split(r"[;\n]+", content) if segment.strip()]
+        if not fragments:
+            return None
+
+        for fragment in fragments:
+            normalized = fragment
+            if "=" not in normalized and ":" in normalized:
+                normalized = normalized.replace(":", "=", 1)
+            if "=" in normalized:
+                key, value = normalized.split("=", 1)
+                key = key.strip().lower()
+                value = value.strip().strip('"\'')
+            else:
+                key = None
+                value = normalized.strip().strip('"\'')
+
+            if not value:
+                continue
+
+            if key in {"id", "user_id", "uid"} or (key is None and value.isdigit() and user_id is None):
+                try:
+                    user_id = int(value)
+                except ValueError:
+                    return None
+                continue
+
+            if key in {"alias", "username", "user"} or (
+                key is None and value.startswith("@") and username is None
+            ):
+                username = value
+                continue
+
+            if key in {"name", "display_name", "display"} or key is None:
+                display_name = value
+
+        if not any([user_id, username, display_name]):
+            return None
+
+        return {
+            "telegram_user_id": user_id,
+            "telegram_username": username,
+            "display_name": display_name,
+        }
+
+    async def _render_identity_overview(
+        target: Message | CallbackQuery,
+        state: FSMContext,
+        persona_id: int,
+        *,
+        notice: Optional[str] = None,
+    ) -> None:
+        async with get_session() as session:
+            persona = await personas_service.get_persona_by_id(session, persona_id)
+            if persona is None:
+                await _prompt_identity_persona_choice(
+                    target,
+                    state,
+                    intro="Nie znaleziono wskazanej persony. Wybierz inną z listy.",
+                )
+                return
+            identities = await identities_service.list_persona_identities(
+                session, persona, include_removed=True
+            )
+
+        active = [identity for identity in identities if identity.removed_at is None]
+        removed = [identity for identity in identities if identity.removed_at is not None]
+
+        lines: list[str] = []
+        if notice:
+            lines.append(notice)
+            lines.append("")
+
+        persona_label = html.escape(persona.name or str(persona_id))
+        lines.append(
+            f"Tożsamości persony <b>{persona_label}</b> (ID: <code>{persona_id}</code>)."
+        )
+        lines.append(
+            f"Powiązane wpisy: {_format_identity_summary(len(active), len(identities))}."
+        )
+
+        if active:
+            lines.append("")
+            lines.append("<b>Aktywne wpisy:</b>")
+            for identity in active:
+                description = html.escape(identities_service.describe_identity(identity))
+                lines.append(f"• #{identity.id}: {description}")
+        else:
+            lines.append("")
+            lines.append("Brak aktywnych wpisów. Dodaj nową tożsamość, aby rozpocząć weryfikację.")
+
+        if removed:
+            lines.append("")
+            lines.append("<b>Wyłączone wpisy:</b>")
+            for identity in removed:
+                description = html.escape(identities_service.describe_identity(identity))
+                removed_at = identity.removed_at.strftime("%Y-%m-%d %H:%M") if identity.removed_at else "—"
+                lines.append(f"• #{identity.id}: {description} (wyłączono {removed_at})")
+
+        lines.append("")
+        lines.append(
+            "Możesz zdefiniować wiele wpisów, aby obsłużyć alternatywne konta lub zmiany użytkownika."
+        )
+
+        builder = InlineKeyboardBuilder()
+        builder.button(text="➕ Dodaj tożsamość", callback_data="identity:add")
+        if active:
+            builder.button(text="🗑 Usuń tożsamość", callback_data="identity:remove")
+        builder.button(text="👤 Zmień personę", callback_data="identity:change_persona")
+        builder.button(text="⬅️ Menu główne", callback_data="identity:cancel")
+        builder.adjust(1)
+
+        if isinstance(target, CallbackQuery):
+            await _safe_callback_answer(target)
+            if target.message:
+                await target.message.answer("\n".join(lines), reply_markup=builder.as_markup())
+        else:
+            await target.answer("\n".join(lines), reply_markup=builder.as_markup())
+
+    async def _configure_default_commands() -> None:
+        commands = [
+            BotCommand(command="start", description="Rozpocznij pracę z botem"),
+            BotCommand(command="menu", description="Pokaż menu główne"),
+            BotCommand(command="cancel", description="Przerwij bieżącą operację"),
+        ]
+
+        scope_definitions: Iterable[tuple[str, BotCommandScopeChat | BotCommandScopeAllPrivateChats | None]] = [
+            ("domyślnym", None),
+            ("prywatnych czatów", BotCommandScopeAllPrivateChats()),
+        ]
+
+        for scope_label, scope in scope_definitions:
+            try:
+                if scope is None:
+                    await bot.set_my_commands(commands)
+                else:
+                    await bot.set_my_commands(commands, scope=scope)
+            except TelegramBadRequest as exc:
+                logger.warning(
+                    "Nie udało się ustawić komend w zakresie %s: %s",
+                    scope_label,
+                    exc,
+                )
+
+    async def _configure_admin_commands() -> None:
+        try:
+            chat_id = int(admin_chat_id)
+        except (TypeError, ValueError):
+            logger.warning(
+                "Nie można ustawić komend – niepoprawny identyfikator czatu administracyjnego: %r",
+                admin_chat_id,
+            )
+            return
+
+        commands = [
+            BotCommand(command="start", description="Rozpocznij pracę z botem"),
+            BotCommand(command="menu", description="Pokaż menu główne"),
+            BotCommand(command="cancel", description="Przerwij bieżącą operację"),
+            BotCommand(command="clear_queue", description="Wyczyść kolejkę moderacji"),
+        ]
+
+        try:
+            await bot.set_my_commands(commands, scope=BotCommandScopeChat(chat_id=chat_id))
+        except TelegramBadRequest as exc:
+            logger.warning("Nie udało się ustawić komend w czacie administracyjnym: %s", exc)
+
+    dispatcher.startup.register(_configure_default_commands)
+    dispatcher.startup.register(_configure_admin_commands)
 
     admin_router = Router(name=f"admin-router-{bot_id or 'default'}")
     admin_router.message.filter(lambda message: _is_admin_chat_id(message.chat.id))
@@ -160,10 +837,17 @@ def build_dispatcher(
         if intro:
             text_lines.append(intro)
         text_lines.append("Wybierz akcję z przycisków poniżej.")
+        text_lines.append("")
+        text_lines.append("<b>Komendy tekstowe:</b>")
+        text_lines.append("• /menu – pokaż menu główne.")
+        text_lines.append("• /cancel lub /anuluj – przerwij bieżącą operację.")
+        text_lines.append(
+            "• /clear_queue (oraz aliasy /clear-queue, /clear-queque, /panic) – wyczyść kolejkę moderacyjną."
+        )
 
         keyboard = _main_menu_keyboard().as_markup()
         if isinstance(target, CallbackQuery):
-            await target.answer()
+            await _safe_callback_answer(target)
             if target.message:
                 await target.message.answer("\n".join(text_lines), reply_markup=keyboard)
         else:
@@ -185,6 +869,228 @@ def build_dispatcher(
     async def handle_menu(message: Message, state: FSMContext) -> None:
         await _send_menu(message, state, intro="Menu główne")
 
+    @admin_router.callback_query(F.data == "menu:identities")
+    async def handle_identity_menu(callback: CallbackQuery, state: FSMContext) -> None:
+        await _prompt_identity_persona_choice(
+            callback, state, intro="Zarządzanie tożsamościami persony."
+        )
+
+    @admin_router.callback_query(lambda c: c.data == "identity:cancel")
+    async def handle_identity_cancel(callback: CallbackQuery, state: FSMContext) -> None:
+        await _send_menu(callback, state, intro="Menu główne")
+
+    @admin_router.callback_query(
+        IdentityStates.choosing_persona,
+        lambda c: c.data is not None and c.data.startswith("identity:persona:"),
+    )
+    async def handle_identity_persona_choice(callback: CallbackQuery, state: FSMContext) -> None:
+        data_raw = (callback.data or "").split(":")
+        try:
+            persona_id = int(data_raw[-1])
+        except (ValueError, IndexError):
+            await _safe_callback_answer(callback, "Niepoprawna persona.", show_alert=True)
+            return
+
+        await state.update_data(identity_persona_id=persona_id)
+        await state.set_state(IdentityStates.managing_persona)
+        await _render_identity_overview(callback, state, persona_id)
+
+    @admin_router.callback_query(IdentityStates.managing_persona, F.data == "identity:change_persona")
+    async def handle_identity_change_persona(
+        callback: CallbackQuery, state: FSMContext
+    ) -> None:
+        await state.update_data(identity_persona_id=None)
+        await _prompt_identity_persona_choice(
+            callback, state, intro="Wybierz inną personę do aktualizacji tożsamości."
+        )
+
+    @admin_router.callback_query(IdentityStates.managing_persona, F.data == "identity:add")
+    async def handle_identity_add(callback: CallbackQuery, state: FSMContext) -> None:
+        data = await state.get_data()
+        if data.get("identity_persona_id") is None:
+            await _prompt_identity_persona_choice(
+                callback, state, intro="Wybierz najpierw personę, a następnie dodaj tożsamość."
+            )
+            return
+
+        await state.set_state(IdentityStates.waiting_identity_payload)
+        await _safe_callback_answer(callback)
+        instructions = (
+            "Wyślij dane tożsamości w jednej wiadomości. Możesz użyć formatu:\n"
+            "<code>id=123456789\nalias=@przyklad\nname=Jan Kowalski</code>\n"
+            "Wystarczy podać dowolne z pól <code>id</code>, <code>alias</code> lub <code>name</code>.\n"
+            "Aby anulować, wpisz /cancel."
+        )
+        if callback.message:
+            await callback.message.answer(instructions)
+
+    @admin_router.message(IdentityStates.waiting_identity_payload)
+    async def handle_identity_payload(message: Message, state: FSMContext) -> None:
+        data = await state.get_data()
+        persona_id_raw = data.get("identity_persona_id")
+        if persona_id_raw is None:
+            await message.answer("Brak wybranej persony. Wybierz ją ponownie z listy.")
+            await _prompt_identity_persona_choice(
+                message, state, intro="Wybierz personę, której tożsamość chcesz uzupełnić."
+            )
+            return
+
+        parsed = _parse_identity_payload(message.text or message.caption or "")
+        if not parsed:
+            await message.answer(
+                "Nie rozumiem tego formatu. Skorzystaj z kluczy <code>id</code>, <code>alias</code> lub "
+                "<code>name</code> – każdy w osobnej linii lub oddzielone średnikiem."
+            )
+            return
+
+        async with get_session() as session:
+            persona = await personas_service.get_persona_by_id(session, int(persona_id_raw))
+            if persona is None:
+                await message.answer("Wybrana persona już nie istnieje. Wybierz inną.")
+                await _prompt_identity_persona_choice(
+                    message, state, intro="Wybierz personę, której tożsamości chcesz zarządzać."
+                )
+                return
+
+            identity = await identities_service.add_identity(
+                session,
+                persona,
+                telegram_user_id=parsed.get("telegram_user_id"),
+                telegram_username=parsed.get("telegram_username"),
+                display_name=parsed.get("display_name"),
+                admin_user_id=message.from_user.id if message.from_user else None,
+                admin_chat_id=message.chat.id,
+            )
+            description = identities_service.describe_identity(identity)
+            await session.commit()
+
+        await state.set_state(IdentityStates.managing_persona)
+        await message.answer(
+            f"✅ Zapisano tożsamość: <i>{html.escape(description)}</i>."
+        )
+        await _render_identity_overview(message, state, int(persona_id_raw))
+
+    @admin_router.callback_query(IdentityStates.managing_persona, F.data == "identity:remove")
+    async def handle_identity_remove_start(
+        callback: CallbackQuery, state: FSMContext
+    ) -> None:
+        data = await state.get_data()
+        persona_id_raw = data.get("identity_persona_id")
+        if persona_id_raw is None:
+            await _prompt_identity_persona_choice(
+                callback, state, intro="Wybierz personę, dla której chcesz usunąć tożsamość."
+            )
+            return
+
+        async with get_session() as session:
+            persona = await personas_service.get_persona_by_id(session, int(persona_id_raw))
+            if persona is None:
+                await _prompt_identity_persona_choice(
+                    callback, state, intro="Wybrana persona została usunięta. Wybierz inną."
+                )
+                return
+            active_identities = await identities_service.list_persona_identities(
+                session, persona, include_removed=False
+            )
+
+        if not active_identities:
+            await _safe_callback_answer(
+                callback,
+                "Brak aktywnych wpisów do wyłączenia.",
+                show_alert=True,
+            )
+            return
+
+        builder = InlineKeyboardBuilder()
+        for identity in active_identities:
+            label = f"#{identity.id}: {identities_service.describe_identity(identity)}"
+            if len(label) > 60:
+                label = label[:57] + "…"
+            builder.button(text=label, callback_data=f"identity:remove:{identity.id}")
+        builder.button(text="⬅️ Anuluj", callback_data="identity:remove:cancel")
+        builder.adjust(1)
+
+        await state.set_state(IdentityStates.choosing_identity_to_remove)
+        await _safe_callback_answer(callback)
+        if callback.message:
+            await callback.message.answer(
+                "Wybierz wpis, który chcesz wyłączyć.", reply_markup=builder.as_markup()
+            )
+
+    @admin_router.callback_query(
+        IdentityStates.choosing_identity_to_remove,
+        F.data == "identity:remove:cancel",
+    )
+    async def handle_identity_remove_cancel(
+        callback: CallbackQuery, state: FSMContext
+    ) -> None:
+        await state.set_state(IdentityStates.managing_persona)
+        data = await state.get_data()
+        persona_id_raw = data.get("identity_persona_id")
+        if persona_id_raw is None:
+            await _prompt_identity_persona_choice(
+                callback, state, intro="Wybierz personę, której tożsamości chcesz zobaczyć."
+            )
+            return
+        await _render_identity_overview(
+            callback,
+            state,
+            int(persona_id_raw),
+            notice="Anulowano wybór tożsamości do usunięcia.",
+        )
+
+    @admin_router.callback_query(
+        IdentityStates.choosing_identity_to_remove,
+        lambda c: c.data is not None
+        and c.data.startswith("identity:remove:")
+        and c.data != "identity:remove:cancel",
+    )
+    async def handle_identity_remove_confirm(
+        callback: CallbackQuery, state: FSMContext
+    ) -> None:
+        try:
+            identity_id = int((callback.data or "").rsplit(":", 1)[-1])
+        except (ValueError, IndexError):
+            await _safe_callback_answer(callback, "Niepoprawny wpis.", show_alert=True)
+            return
+
+        data = await state.get_data()
+        persona_id_raw = data.get("identity_persona_id")
+        if persona_id_raw is None:
+            await _prompt_identity_persona_choice(
+                callback, state, intro="Wybierz personę, której tożsamości chcesz zarządzać."
+            )
+            return
+
+        async with get_session() as session:
+            identity = await identities_service.get_identity_by_id(session, identity_id)
+            if identity is None or identity.persona_id != int(persona_id_raw):
+                await _safe_callback_answer(
+                    callback, "Nie znaleziono wskazanej tożsamości.", show_alert=True
+                )
+                await state.set_state(IdentityStates.managing_persona)
+                await _render_identity_overview(callback, state, int(persona_id_raw))
+                return
+
+            description = identities_service.describe_identity(identity)
+            await identities_service.remove_identity(
+                session,
+                identity,
+                admin_user_id=callback.from_user.id if callback.from_user else None,
+                admin_chat_id=callback.message.chat.id if callback.message else None,
+            )
+            await session.commit()
+
+        await state.set_state(IdentityStates.managing_persona)
+        await _render_identity_overview(
+            callback,
+            state,
+            int(persona_id_raw),
+            notice=(
+                f"🗑 Wyłączono wpis #{identity_id}: <i>{html.escape(description)}</i>."
+            ),
+        )
+
     @admin_router.message(Command("cancel"))
     @admin_router.message(Command("anuluj"))
     async def handle_cancel(message: Message, state: FSMContext) -> None:
@@ -195,6 +1101,180 @@ def build_dispatcher(
         await message.answer("Operacja przerwana. Wracam do menu głównego.")
         await _send_menu(message, state)
 
+    @admin_router.message(Command(commands=["clear_queue", "clear-queue", "clear-queque", "panic"]))
+    async def handle_clear_queue(message: Message, state: FSMContext) -> None:
+        async with get_session() as session:
+            removed = await moderation_service.purge_pending_submissions(
+                session, persona_id=current_persona_id
+            )
+            await session.commit()
+
+        await state.clear()
+
+        if removed == 0:
+            response = "📭 Kolejka moderacyjna była już pusta."
+        elif removed == 1:
+            response = "🧹 Usunięto 1 zgłoszenie z kolejki moderacyjnej."
+        else:
+            response = f"🧹 Usunięto {removed} zgłoszeń z kolejki moderacyjnej."
+
+        await message.answer(response)
+        await _send_menu(message, state)
+
+    @admin_router.message(Command("del"))
+    async def handle_delete_quote(message: Message, command: CommandObject) -> None:
+        if current_persona_id is None:
+            await message.answer(
+                "Ten bot nie ma przypisanej persony – nie mogę usuwać cytatów."
+            )
+            return
+
+        argument_text = (command.args or "").strip() if command else ""
+        if not argument_text:
+            await message.answer("Podaj numer cytatu do usunięcia, np. /del 123.")
+            return
+
+        candidate = argument_text.split()[0]
+        try:
+            quote_id = int(candidate)
+        except ValueError:
+            await message.answer("ID cytatu musi być liczbą, np. /del 123.")
+            return
+
+        async with get_session() as session:
+            quote = await quotes_service.get_quote_by_id(session, quote_id)
+            if quote is None:
+                await message.answer(f"Nie znaleziono cytatu o ID {quote_id}.")
+                return
+
+            if quote.persona_id != current_persona_id:
+                await message.answer(
+                    "Nie mogę usunąć tego cytatu – należy do innej persony."
+                )
+                return
+
+            media_value = (
+                quote.media_type.value
+                if isinstance(quote.media_type, MediaType)
+                else str(quote.media_type)
+            )
+            text_preview = (quote.text_content or "").strip()
+            file_id = quote.file_id or ""
+
+            await quotes_service.delete_quote(
+                session,
+                quote,
+                removed_by_user_id=message.from_user.id if message.from_user else None,
+                removed_in_chat_id=message.chat.id,
+            )
+            await session.commit()
+
+        lines = [f"🗑 Usunięto cytat #{quote_id}."]
+        lines.append(f"Typ: <code>{html.escape(media_value)}</code>.")
+        if file_id:
+            lines.append(f"Plik: <code>{html.escape(file_id)}</code>")
+        if text_preview:
+            lines.append("")
+            lines.append(f"<blockquote>{html.escape(text_preview[:200])}</blockquote>")
+
+        await message.answer("\n".join(lines))
+
+    @admin_router.message(lambda message: _has_forward_metadata(message))
+    async def handle_forwarded_quote_lookup(message: Message, state: FSMContext) -> None:
+        current_state = await state.get_state()
+        if current_state is not None:
+            logger.debug(
+                "Pomijamy przekazaną wiadomość %s – aktywny stan FSM: %s",
+                _describe_message(message),
+                current_state,
+            )
+            return
+
+        forward_from = getattr(message, "forward_from", None)
+        forward_origin = getattr(message, "forward_origin", None)
+        forward_from_chat = getattr(message, "forward_from_chat", None)
+
+        forwarded_from_bot = False
+        if forward_from is not None and getattr(forward_from, "is_bot", False):
+            forwarded_from_bot = True
+        else:
+            origin_user = getattr(forward_origin, "sender_user", None)
+            if origin_user is not None and getattr(origin_user, "is_bot", False):
+                forwarded_from_bot = True
+            origin_chat = getattr(forward_origin, "sender_chat", None)
+            if origin_chat is None:
+                origin_chat = forward_from_chat
+            if origin_chat is not None and getattr(origin_chat, "type", None) == "bot":
+                forwarded_from_bot = True
+
+        if not forwarded_from_bot:
+            logger.debug(
+                "Pomijamy przekazaną wiadomość %s – brak potwierdzenia, że pochodzi od bota.",
+                _describe_message(message),
+            )
+            return
+
+        text_payload = (message.text or message.caption or "").strip()
+        file_id: Optional[str] = None
+        if message.photo:
+            file_id = message.photo[-1].file_id
+        elif message.voice:
+            file_id = message.voice.file_id
+        elif message.audio:
+            file_id = message.audio.file_id
+
+        if not text_payload and not file_id:
+            logger.debug(
+                "Przekazana wiadomość %s nie zawiera treści ani obsługiwanego pliku.",
+                _describe_message(message),
+            )
+            return
+
+        async with get_session() as session:
+            matches = await quotes_service.find_quotes_matching_payload(
+                session,
+                text_content=text_payload or None,
+                file_id=file_id,
+                limit=5,
+            )
+
+        if not matches:
+            logger.info(
+                "Nie znaleziono cytatów odpowiadających przekazanej wiadomości: %s",
+                _describe_message(message),
+            )
+            await message.reply(
+                "Nie znalazłem w bazie cytatu odpowiadającego tej wiadomości."
+            )
+            return
+
+        match_labels = {"text": "treści", "file_id": "identyfikatora pliku"}
+        lines = ["🔎 Odnalazłem pasujące cytaty:"]
+
+        for quote, match_type in matches:
+            persona_name = (
+                quote.persona.name if quote.persona and quote.persona.name else str(quote.persona_id)
+            )
+            media_value = (
+                quote.media_type.value
+                if isinstance(quote.media_type, MediaType)
+                else str(quote.media_type)
+            )
+            reason = match_labels.get(match_type, match_type)
+            lines.append(
+                "• ID: <code>{id}</code> (persona: <i>{persona}</i>, typ: <code>{media}</code>, na podstawie {reason})".format(
+                    id=quote.id,
+                    persona=html.escape(persona_name),
+                    media=html.escape(media_value),
+                    reason=reason,
+                )
+            )
+            preview = (quote.text_content or "").strip()
+            if preview:
+                lines.append(f"  <blockquote>{html.escape(preview[:200])}</blockquote>")
+
+        await message.reply("\n".join(lines))
+
     @admin_router.callback_query(F.data == "menu:main")
     async def handle_back_to_menu(callback: CallbackQuery, state: FSMContext) -> None:
         await _send_menu(callback, state, intro="Menu główne")
@@ -202,13 +1282,20 @@ def build_dispatcher(
     @admin_router.callback_query(F.data == "menu:refresh_tokens")
     async def handle_refresh_tokens(callback: CallbackQuery, state: FSMContext) -> None:
         await bots_service.refresh_bot_token_cache()
-        await callback.answer("Cache tokenów został odświeżony.", show_alert=False)
+        await _safe_callback_answer(callback, "Cache tokenów został odświeżony.", show_alert=False)
 
     @admin_router.callback_query(F.data == "menu:list_bots")
     async def handle_list_bots(callback: CallbackQuery, state: FSMContext) -> None:
         await state.clear()
         async with get_session() as session:
             bots = await bots_service.list_bots(session)
+            persona_stats = await personas_service.list_personas_with_identity_stats(session)
+            quote_stats = await quotes_service.aggregate_quote_stats(session)
+
+        stats_by_persona = {
+            summary.persona.id: summary for summary in persona_stats
+        }
+        quote_stats_by_persona = quote_stats
 
         if not bots:
             text = "🚫 Brak aktywnych botów. Wybierz „Dodaj bota”, aby rozpocząć."
@@ -216,40 +1303,159 @@ def build_dispatcher(
             lines = ["<b>Aktywne boty:</b>"]
             for bot_entry in bots:
                 persona_name = bot_entry.persona.name if bot_entry.persona else "—"
-                lines.append(
-                    f"• <b>{bot_entry.display_name}</b> (persona: <i>{persona_name}</i>, ID: <code>{bot_entry.id}</code>)"
+                resource_note, quote_count = _format_resource_summary(
+                    quote_stats_by_persona.get(bot_entry.persona_id)
                 )
+                lines.append(
+                    "• <b>{display}</b> (persona: <i>{persona}</i>, ID: <code>{bot_id}</code>, "
+                    "zasoby: {resources}, cytaty: {quotes})".format(
+                        display=bot_entry.display_name,
+                        persona=persona_name,
+                        bot_id=bot_entry.id,
+                        resources=resource_note,
+                        quotes=quote_count,
+                    )
+                )
+                if bot_entry.persona_id in stats_by_persona:
+                    summary = stats_by_persona[bot_entry.persona_id]
+                    identity_note = _format_identity_summary(
+                        summary.active_identities, summary.total_identities
+                    )
+                else:
+                    identity_note = "brak tożsamości"
+                lines.append(f"    ↳ Tożsamości: {identity_note}")
             text = "\n".join(lines)
 
-        await callback.answer()
+        await _safe_callback_answer(callback)
         if callback.message:
             await callback.message.answer(text, reply_markup=_main_menu_keyboard().as_markup())
 
-    def _snapshot_submission(submission: Submission) -> dict[str, Any]:
+    @admin_router.callback_query(F.data == "menu:list_quotes")
+    async def handle_list_quotes(callback: CallbackQuery, state: FSMContext) -> None:
+        await state.clear()
+        async with get_session() as session:
+            all_quotes = await quotes_service.list_all_quotes_with_personas(session)
+
+        await _safe_callback_answer(callback)
+        if not callback.message:
+            return
+
+        if not all_quotes:
+            await callback.message.answer(
+                "📭 Brak zapisanych cytatów.",
+                reply_markup=_main_menu_keyboard().as_markup(),
+            )
+            return
+
+        sorted_quotes = sorted(
+            all_quotes,
+            key=lambda quote: (
+                (quote.persona.name.casefold() if quote.persona and quote.persona.name else ""),
+                quote.persona_id or 0,
+                quote.id,
+            ),
+        )
+
+        lines: list[str] = ["<b>Wszystkie cytaty:</b>"]
+        current_persona_key: Optional[tuple[int, str]] = None
+
+        for quote in sorted_quotes:
+            persona_name = quote.persona.name if quote.persona else "— bez persony —"
+            persona_id = quote.persona_id or 0
+            persona_key = (persona_id, persona_name)
+            if persona_key != current_persona_key:
+                if lines and lines[-1]:
+                    lines.append("")
+                elif len(lines) == 1:
+                    lines.append("")
+                lines.append(
+                    f"<b>{html.escape(persona_name)}</b> (ID: <code>{persona_id}</code>)"
+                )
+                current_persona_key = persona_key
+            preview = _format_quote_preview(quote)
+            lines.append(f"• {preview} (ID: <code>{quote.id}</code>)")
+
+        max_message_length = 3800
+        chunks: list[str] = []
+        current_lines: list[str] = []
+        current_length = 0
+
+        for line in lines:
+            addition = len(line)
+            if current_lines:
+                addition += 1
+            if current_lines and current_length + addition > max_message_length:
+                chunks.append("\n".join(current_lines))
+                current_lines = [line]
+                current_length = len(line)
+            else:
+                if current_lines:
+                    current_length += 1
+                current_lines.append(line)
+                current_length += len(line)
+
+        if current_lines:
+            chunks.append("\n".join(current_lines))
+
+        for index, chunk in enumerate(chunks):
+            reply_markup = (
+                _main_menu_keyboard().as_markup()
+                if index == len(chunks) - 1
+                else None
+            )
+            await callback.message.answer(chunk, reply_markup=reply_markup)
+
+    async def _snapshot_submission(
+        session: AsyncSession, submission: Submission
+    ) -> dict[str, Any]:
+        persona = submission.__dict__.get("persona")
+
+        duplicate_info = await _build_duplicate_snapshot(session, submission)
+
         return {
             "id": submission.id,
             "persona_id": submission.persona_id,
-            "persona_name": submission.persona.name if submission.persona else None,
+            "persona_name": persona.name if persona else None,
             "submitted_by_user_id": submission.submitted_by_user_id,
             "submitted_chat_id": submission.submitted_chat_id,
             "submitted_by_username": submission.submitted_by_username,
             "submitted_by_name": submission.submitted_by_name,
+            "quoted_user_id": submission.quoted_user_id,
+            "quoted_username": submission.quoted_username,
+            "quoted_name": submission.quoted_name,
             "media_type": submission.media_type.value if isinstance(submission.media_type, MediaType) else str(submission.media_type),
             "text_content": submission.text_content or "",
             "file_id": submission.file_id,
             "created_at": submission.created_at.isoformat(),
             "identity_check": _build_identity_snapshot(submission),
+            "duplicate_check": duplicate_info,
         }
 
-    async def _fetch_pending_snapshots() -> list[dict[str, Any]]:
+    async def _fetch_pending_snapshots(
+        *, exclude_ids: Optional[Iterable[int]] = None
+    ) -> tuple[list[dict[str, Any]], int]:
         persona_filter = current_persona_id if current_persona_id is not None else None
         async with get_session() as session:
-            submissions = await moderation_service.list_pending_submissions(
+            total_pending = await moderation_service.count_pending_submissions(
                 session, persona_id=persona_filter
             )
-            return [_snapshot_submission(item) for item in submissions]
+            submissions = await moderation_service.list_pending_submissions(
+                session,
+                persona_id=persona_filter,
+                limit=MAX_PENDING_PREVIEW,
+                exclude_ids=exclude_ids,
+            )
+            snapshots: list[dict[str, Any]] = []
+            for item in submissions:
+                snapshots.append(await _snapshot_submission(session, item))
+        return snapshots, total_pending
 
-    async def _compose_submission_view(snapshot: dict[str, Any]) -> tuple[str, InlineKeyboardMarkup, MediaType]:
+    async def _compose_submission_view(
+        snapshot: dict[str, Any],
+        *,
+        queue_size: Optional[int] = None,
+        preview_limit: Optional[int] = None,
+    ) -> tuple[str, InlineKeyboardMarkup, MediaType]:
         try:
             created_at_dt = datetime.fromisoformat(snapshot["created_at"])
             created_at_text = created_at_dt.strftime("%Y-%m-%d %H:%M:%S")
@@ -275,11 +1481,22 @@ def build_dispatcher(
         lines = [
             f"<b>Moderacja – zgłoszenie #{snapshot['id']}</b>",
             f"Persona: <i>{persona_label}</i>",
-            f"Użytkownik: <code>{snapshot.get('submitted_by_user_id')}</code>",
+            f"Użytkownik: {_format_user_link(snapshot.get('submitted_by_user_id'))}",
             f"Czat: <code>{snapshot.get('submitted_chat_id')}</code>",
             f"Typ: <code>{media_type_enum.value}</code>",
             f"Zgłoszono: {created_at_text}",
         ]
+
+        if queue_size is not None:
+            if queue_size == 1:
+                queue_line = "W kolejce: 1 zgłoszenie (łącznie z tym wpisem)."
+            else:
+                queue_line = f"W kolejce: {queue_size} zgłoszeń."
+            lines.append(queue_line)
+            if preview_limit is not None and queue_size > preview_limit:
+                lines.append(
+                    f"Wyświetlam {preview_limit} najstarszych wpisów do moderacji."
+                )
 
         username_value = snapshot.get("submitted_by_username")
         if username_value:
@@ -290,6 +1507,22 @@ def build_dispatcher(
         display_name_value = snapshot.get("submitted_by_name")
         if display_name_value:
             lines.append(f"Nazwa: <i>{html.escape(display_name_value)}</i>")
+
+        quoted_user_id = snapshot.get("quoted_user_id")
+        quoted_username = snapshot.get("quoted_username")
+        quoted_name = snapshot.get("quoted_name")
+        if quoted_user_id is not None:
+            lines.append(
+                f"Cytowany użytkownik: {_format_user_link(quoted_user_id)}"
+            )
+        if quoted_username:
+            username_clean = quoted_username[1:] if quoted_username.startswith("@") else quoted_username
+            if username_clean:
+                lines.append(
+                    f"Alias cytowanego: <code>@{html.escape(username_clean)}</code>"
+                )
+        if quoted_name:
+            lines.append(f"Nazwa cytowanego: <i>{html.escape(quoted_name)}</i>")
 
         identity_info = snapshot.get("identity_check") or {}
         identity_matched = identity_info.get("matched")
@@ -330,6 +1563,35 @@ def build_dispatcher(
                     for descriptor_text in available:
                         lines.append(f"• {html.escape(descriptor_text)}")
 
+        duplicate_info = snapshot.get("duplicate_check") or {}
+        duplicate_entry = duplicate_info.get("exact")
+        match_type = duplicate_info.get("match_type")
+
+        if duplicate_entry:
+            lines.append("")
+            lines.append("⚠️ <b>W bazie znajduje się identyczny cytat.</b>")
+            lines.append(
+                f"ID w bazie: <code>{duplicate_entry['id']}</code> (typ: <code>{html.escape(str(duplicate_entry.get('media_type') or ''))}</code>)"
+            )
+            if match_type == "text":
+                lines.append("Powód: treść zgłoszenia odpowiada zapisanej w bazie.")
+            elif match_type == "file_hash":
+                lines.append("Powód: hash pliku zgadza się z istniejącym cytatem.")
+            elif match_type == "file_id":
+                lines.append("Powód: Telegram zwrócił identyczny identyfikator pliku.")
+
+            preview_text = duplicate_entry.get("text_preview")
+            if preview_text:
+                lines.append("")
+                lines.append(f"<blockquote>{html.escape(preview_text)}</blockquote>")
+            else:
+                duplicate_file = duplicate_entry.get("file_id")
+                if duplicate_file:
+                    lines.append(f"Plik: <code>{html.escape(duplicate_file)}</code>")
+        elif duplicate_info.get("checked") is False:
+            lines.append("")
+            lines.append("ℹ️ Nie udało się zweryfikować duplikatów (brak przypisanej persony).")
+
         text_content = snapshot.get("text_content") or ""
         if text_content.strip():
             lines.append("")
@@ -345,8 +1607,16 @@ def build_dispatcher(
 
         return "\n".join(lines), keyboard.as_markup(), media_type_enum
 
-    async def _send_submission_preview(message: Message, snapshot: dict[str, Any]) -> None:
-        text, keyboard_markup, media_type_enum = await _compose_submission_view(snapshot)
+    async def _send_submission_preview(
+        message: Message,
+        snapshot: dict[str, Any],
+        *,
+        queue_size: Optional[int] = None,
+        preview_limit: Optional[int] = None,
+    ) -> None:
+        text, keyboard_markup, media_type_enum = await _compose_submission_view(
+            snapshot, queue_size=queue_size, preview_limit=preview_limit
+        )
         file_id = snapshot.get("file_id")
 
         if file_id:
@@ -360,6 +1630,60 @@ def build_dispatcher(
                 pass
 
         await message.answer(text, reply_markup=keyboard_markup)
+
+    async def _announce_created_quote(
+        bot_instance: Bot, chat_id: int, quote_snapshot: dict[str, Any]
+    ) -> None:
+        quote_id = quote_snapshot["id"]
+        raw_media = quote_snapshot.get("media_type", MediaType.TEXT)
+        try:
+            media_type = (
+                raw_media
+                if isinstance(raw_media, MediaType)
+                else MediaType(str(raw_media))
+            )
+        except ValueError:
+            media_type = MediaType.TEXT
+
+        text_content = (quote_snapshot.get("text_content") or "").strip()
+        file_id = quote_snapshot.get("file_id") or None
+        header = f"🆕 Cytat #{quote_id}"
+
+        async def _send_text_summary(extra_notice: Optional[str] = None) -> None:
+            lines = [header]
+            if extra_notice:
+                lines.append(extra_notice)
+            if text_content:
+                lines.append("")
+                lines.append(f"<blockquote>{html.escape(text_content)}</blockquote>")
+            await bot_instance.send_message(chat_id, "\n".join(lines))
+
+        if media_type == MediaType.TEXT or not file_id:
+            notice = None if text_content else "Brak treści tekstowej."
+            await _send_text_summary(notice)
+            return
+
+        caption_lines = [header]
+        if text_content:
+            caption_lines.append("")
+            caption_lines.append(text_content)
+        caption = "\n".join(caption_lines)
+
+        try:
+            if media_type == MediaType.IMAGE:
+                await bot_instance.send_photo(chat_id, file_id, caption=caption)
+                return
+            if media_type == MediaType.AUDIO:
+                await bot_instance.send_audio(chat_id, file_id, caption=caption)
+                return
+        except TelegramBadRequest:
+            notice = "Nie udało się przesłać pliku cytatu."
+            if file_id:
+                notice += f" ID pliku: <code>{html.escape(file_id)}</code>"
+            await _send_text_summary(notice)
+            return
+
+        await _send_text_summary(None if text_content else "Brak treści tekstowej.")
 
     async def _notify_submission(message_bot: Bot, chat_id: int, snapshot: dict[str, Any]) -> None:
         text, keyboard_markup, media_type_enum = await _compose_submission_view(snapshot)
@@ -382,10 +1706,11 @@ def build_dispatcher(
         state: FSMContext,
         *,
         reset_skip: bool = False,
+        announce_queue: bool = False,
     ) -> None:
         message_obj: Optional[Message]
         if isinstance(target, CallbackQuery):
-            await target.answer()
+            await _safe_callback_answer(target)
             message_obj = target.message
         else:
             message_obj = target
@@ -398,7 +1723,23 @@ def build_dispatcher(
         if not reset_skip:
             skipped_ids = set(int(x) for x in data.get("moderation_skipped", []))
 
-        snapshots = await _fetch_pending_snapshots()
+        snapshots, total_pending = await _fetch_pending_snapshots(
+            exclude_ids=skipped_ids if skipped_ids else None
+        )
+
+        if announce_queue:
+            summary_text, summary_markup = _compose_queue_summary_message(
+                snapshots, total_pending
+            )
+            await message_obj.answer(summary_text, reply_markup=summary_markup)
+            if total_pending == 0:
+                await state.update_data(
+                    moderation_current_submission=None,
+                    moderation_current_snapshot=None,
+                    moderation_skipped=[],
+                )
+                return
+
         for snapshot in snapshots:
             if snapshot["id"] in skipped_ids:
                 continue
@@ -408,7 +1749,12 @@ def build_dispatcher(
                 moderation_current_snapshot=snapshot,
                 moderation_skipped=list(skipped_ids),
             )
-            await _send_submission_preview(message_obj, snapshot)
+            await _send_submission_preview(
+                message_obj,
+                snapshot,
+                queue_size=total_pending,
+                preview_limit=MAX_PENDING_PREVIEW,
+            )
             return
 
         await state.update_data(
@@ -425,7 +1771,9 @@ def build_dispatcher(
     async def handle_moderation_menu(callback: CallbackQuery, state: FSMContext) -> None:
         await state.set_state(ModerationStates.reviewing)
         await state.update_data(moderation_skipped=[])
-        await _show_next_submission(callback, state, reset_skip=True)
+        await _show_next_submission(
+            callback, state, reset_skip=True, announce_queue=True
+        )
 
     @admin_router.callback_query(lambda c: c.data is not None and c.data.startswith("moderation:approve:"))
     async def handle_moderation_approve(callback: CallbackQuery, state: FSMContext) -> None:
@@ -433,13 +1781,18 @@ def build_dispatcher(
         try:
             submission_id = int(submission_id_raw)
         except ValueError:
-            await callback.answer("Niepoprawne zgłoszenie.", show_alert=True)
+            await _safe_callback_answer(callback, "Niepoprawne zgłoszenie.", show_alert=True)
             return
 
+        created_quote_snapshot: Optional[dict[str, Any]] = None
         async with get_session() as session:
             submission = await moderation_service.get_submission_by_id(session, submission_id)
             if submission is None or submission.status != ModerationStatus.PENDING:
-                await callback.answer("To zgłoszenie zostało już przetworzone.", show_alert=True)
+                await _safe_callback_answer(
+                    callback,
+                    "To zgłoszenie zostało już przetworzone.",
+                    show_alert=True,
+                )
                 await state.update_data(moderation_skipped=[])
                 await _show_next_submission(callback, state, reset_skip=True)
                 return
@@ -455,7 +1808,7 @@ def build_dispatcher(
                         field_text = _format_identity_fields(fields)
                         if descriptor_text and field_text:
                             reason += f" Najbliższe dopasowanie: {descriptor_text} ({field_text})."
-                await callback.answer(reason, show_alert=True)
+                await _safe_callback_answer(callback, reason, show_alert=True)
                 return
             moderator_user_id = callback.from_user.id if callback.from_user else None
             moderator_chat_id = callback.message.chat.id if callback.message else None
@@ -466,11 +1819,23 @@ def build_dispatcher(
                 moderator_chat_id=moderator_chat_id,
                 action=ModerationStatus.APPROVED,
             )
-            await quotes_service.create_quote_from_submission(session, submission)
+            quote = await quotes_service.create_quote_from_submission(session, submission)
+            media_value = quote.media_type
+            if not isinstance(media_value, MediaType):
+                try:
+                    media_value = MediaType(str(media_value))
+                except ValueError:
+                    media_value = MediaType.TEXT
+            created_quote_snapshot = {
+                "id": quote.id,
+                "media_type": media_value,
+                "text_content": quote.text_content,
+                "file_id": quote.file_id,
+            }
             submitted_chat_id = submission.submitted_chat_id
             await session.commit()
 
-        await callback.answer("Zgłoszenie zatwierdzone.", show_alert=False)
+        await _safe_callback_answer(callback, "Zgłoszenie zatwierdzone.", show_alert=False)
 
         if (
             submitted_chat_id
@@ -488,19 +1853,28 @@ def build_dispatcher(
         await state.update_data(moderation_skipped=[])
         await _show_next_submission(callback, state, reset_skip=True)
 
+        if callback.message and created_quote_snapshot:
+            await _announce_created_quote(
+                callback.message.bot, callback.message.chat.id, created_quote_snapshot
+            )
+
     @admin_router.callback_query(lambda c: c.data is not None and c.data.startswith("moderation:reject:"))
     async def handle_moderation_reject(callback: CallbackQuery, state: FSMContext) -> None:
         submission_id_raw = (callback.data or "").rsplit(":", 1)[-1]
         try:
             submission_id = int(submission_id_raw)
         except ValueError:
-            await callback.answer("Niepoprawne zgłoszenie.", show_alert=True)
+            await _safe_callback_answer(callback, "Niepoprawne zgłoszenie.", show_alert=True)
             return
 
         async with get_session() as session:
             submission = await moderation_service.get_submission_by_id(session, submission_id)
             if submission is None or submission.status != ModerationStatus.PENDING:
-                await callback.answer("To zgłoszenie zostało już przetworzone.", show_alert=True)
+                await _safe_callback_answer(
+                    callback,
+                    "To zgłoszenie zostało już przetworzone.",
+                    show_alert=True,
+                )
                 await state.update_data(moderation_skipped=[])
                 await _show_next_submission(callback, state, reset_skip=True)
                 return
@@ -518,7 +1892,7 @@ def build_dispatcher(
             submitted_chat_id = submission.submitted_chat_id
             await session.commit()
 
-        await callback.answer("Zgłoszenie odrzucone.", show_alert=False)
+        await _safe_callback_answer(callback, "Zgłoszenie odrzucone.", show_alert=False)
 
         if (
             submitted_chat_id
@@ -542,14 +1916,14 @@ def build_dispatcher(
         try:
             submission_id = int(submission_id_raw)
         except ValueError:
-            await callback.answer("Niepoprawne zgłoszenie.", show_alert=True)
+            await _safe_callback_answer(callback, "Niepoprawne zgłoszenie.", show_alert=True)
             return
 
         data = await state.get_data()
         skipped = set(int(x) for x in data.get("moderation_skipped", []))
         skipped.add(submission_id)
         await state.update_data(moderation_skipped=list(skipped))
-        await callback.answer("Pominięto.")
+        await _safe_callback_answer(callback, "Pominięto.")
         await _show_next_submission(callback, state)
 
     @admin_router.callback_query(F.data == "menu:edit_bot")
@@ -559,7 +1933,7 @@ def build_dispatcher(
             bots = await bots_service.list_bots(session)
 
         if not bots:
-            await callback.answer()
+            await _safe_callback_answer(callback)
             if callback.message:
                 await callback.message.answer(
                     "🚫 Brak botów do edycji. Wybierz „Dodaj bota”, aby utworzyć nowy rekord.",
@@ -577,7 +1951,7 @@ def build_dispatcher(
         keyboard_builder.adjust(1)
 
         await state.set_state(EditBotStates.choosing_bot)
-        await callback.answer()
+        await _safe_callback_answer(callback)
         if callback.message:
             await callback.message.answer(
                 "Wybierz bota, którego chcesz edytować.",
@@ -592,14 +1966,22 @@ def build_dispatcher(
         try:
             bot_id = int(bot_id_raw)
         except ValueError:
-            await callback.answer("Niepoprawny identyfikator bota.", show_alert=True)
+            await _safe_callback_answer(
+                callback,
+                "Niepoprawny identyfikator bota.",
+                show_alert=True,
+            )
             return
 
         async with get_session() as session:
             bot_record = await bots_service.get_bot_by_id(session, bot_id)
 
         if bot_record is None:
-            await callback.answer("Nie znaleziono bota. Odśwież listę i spróbuj ponownie.", show_alert=True)
+            await _safe_callback_answer(
+                callback,
+                "Nie znaleziono bota. Odśwież listę i spróbuj ponownie.",
+                show_alert=True,
+            )
             return
 
         persona_name = bot_record.persona.name if bot_record.persona else "—"
@@ -611,7 +1993,7 @@ def build_dispatcher(
             current_persona_name=persona_name,
         )
         await state.set_state(EditBotStates.waiting_token)
-        await callback.answer()
+        await _safe_callback_answer(callback)
         if callback.message:
             await callback.message.answer(
                 "Wybrano bota <b>{name}</b> (ID: <code>{id}</code>).\n"
@@ -660,24 +2042,32 @@ def build_dispatcher(
             await state.update_data(new_display_name=display_name_raw)
 
         async with get_session() as session:
-            personas = await personas_service.list_personas(session)
+            persona_stats = await personas_service.list_personas_with_identity_stats(session)
 
         data = await state.get_data()
         current_persona_id = data.get("current_persona_id")
         current_persona_name = data.get("current_persona_name", "—")
 
-        if personas:
+        if persona_stats:
             await state.update_data(
                 persona_choices=[
-                    {"id": persona.id, "name": persona.name, "language": persona.language}
-                    for persona in personas
+                    {
+                        "id": summary.persona.id,
+                        "name": summary.persona.name,
+                        "language": summary.persona.language,
+                        "active_identities": summary.active_identities,
+                        "total_identities": summary.total_identities,
+                    }
+                    for summary in persona_stats
                 ]
             )
             keyboard_builder = InlineKeyboardBuilder()
-            for persona in personas:
+            for summary in persona_stats:
+                persona = summary.persona
                 prefix = "⭐ " if persona.id == current_persona_id else ""
+                hint = _format_identity_summary(summary.active_identities, summary.total_identities)
                 keyboard_builder.button(
-                    text=f"{prefix}{persona.name} ({persona.language})",
+                    text=f"{prefix}{persona.name} ({persona.language}) · {hint}",
                     callback_data=f"edit_persona:{persona.id}",
                 )
             keyboard_builder.button(text="➕ Nowa persona", callback_data="edit_persona:new")
@@ -710,7 +2100,7 @@ def build_dispatcher(
     @admin_router.callback_query(EditBotStates.choosing_persona, F.data == "edit_persona:new")
     async def handle_edit_persona_new(callback: CallbackQuery, state: FSMContext) -> None:
         await state.set_state(EditBotStates.waiting_persona_name)
-        await callback.answer()
+        await _safe_callback_answer(callback)
         if callback.message:
             await callback.message.answer(
                 "Podaj nazwę dla nowej persony. Upewnij się, że nazwa jest unikalna."
@@ -727,14 +2117,18 @@ def build_dispatcher(
         try:
             persona_id = int(persona_id_raw)
         except ValueError:
-            await callback.answer("Niepoprawna persona.", show_alert=True)
+            await _safe_callback_answer(callback, "Niepoprawna persona.", show_alert=True)
             return
 
         data = await state.get_data()
         persona_choices = data.get("persona_choices", [])
         persona_info = next((item for item in persona_choices if item["id"] == persona_id), None)
         if persona_info is None:
-            await callback.answer("Nie znaleziono persony. Spróbuj ponownie.", show_alert=True)
+            await _safe_callback_answer(
+                callback,
+                "Nie znaleziono persony. Spróbuj ponownie.",
+                show_alert=True,
+            )
             return
 
         await _finalize_bot_update(
@@ -813,7 +2207,7 @@ def build_dispatcher(
     @admin_router.callback_query(F.data == "menu:add_bot")
     async def handle_add_bot(callback: CallbackQuery, state: FSMContext) -> None:
         await state.set_state(AddBotStates.waiting_token)
-        await callback.answer()
+        await _safe_callback_answer(callback)
         if callback.message:
             await callback.message.answer(
                 "Wyślij token bota otrzymany od @BotFather.\n"
@@ -845,19 +2239,27 @@ def build_dispatcher(
         await state.update_data(display_name=display_name)
 
         async with get_session() as session:
-            personas = await personas_service.list_personas(session)
+            persona_stats = await personas_service.list_personas_with_identity_stats(session)
 
-        if personas:
+        if persona_stats:
             await state.update_data(
                 persona_choices=[
-                    {"id": persona.id, "name": persona.name, "language": persona.language}
-                    for persona in personas
+                    {
+                        "id": summary.persona.id,
+                        "name": summary.persona.name,
+                        "language": summary.persona.language,
+                        "active_identities": summary.active_identities,
+                        "total_identities": summary.total_identities,
+                    }
+                    for summary in persona_stats
                 ]
             )
             keyboard_builder = InlineKeyboardBuilder()
-            for persona in personas:
+            for summary in persona_stats:
+                persona = summary.persona
+                hint = _format_identity_summary(summary.active_identities, summary.total_identities)
                 keyboard_builder.button(
-                    text=f"{persona.name} ({persona.language})",
+                    text=f"{persona.name} ({persona.language}) · {hint}",
                     callback_data=f"persona:{persona.id}",
                 )
             keyboard_builder.button(text="➕ Nowa persona", callback_data="persona:new")
@@ -879,7 +2281,7 @@ def build_dispatcher(
     @admin_router.callback_query(AddBotStates.choosing_persona, F.data == "persona:new")
     async def handle_new_persona(callback: CallbackQuery, state: FSMContext) -> None:
         await state.set_state(AddBotStates.waiting_persona_name)
-        await callback.answer()
+        await _safe_callback_answer(callback)
         if callback.message:
             await callback.message.answer(
                 "Podaj nazwę dla nowej persony. Upewnij się, że nazwa jest unikalna."
@@ -896,12 +2298,16 @@ def build_dispatcher(
         try:
             persona_id = int(persona_id_str)
         except ValueError:
-            await callback.answer("Niepoprawna persona.", show_alert=True)
+            await _safe_callback_answer(callback, "Niepoprawna persona.", show_alert=True)
             return
 
         persona_info = next((item for item in persona_choices if item["id"] == persona_id), None)
         if persona_info is None:
-            await callback.answer("Nie znaleziono persony. Spróbuj ponownie.", show_alert=True)
+            await _safe_callback_answer(
+                callback,
+                "Nie znaleziono persony. Spróbuj ponownie.",
+                show_alert=True,
+            )
             return
 
         await _finalize_bot_creation(
@@ -992,7 +2398,11 @@ def build_dispatcher(
             # brak wymaganych danych – wróć do menu
             await state.clear()
             if isinstance(target, CallbackQuery):
-                await target.answer("Brak wymaganych danych – spróbuj ponownie.", show_alert=True)
+                await _safe_callback_answer(
+                    target,
+                    "Brak wymaganych danych – spróbuj ponownie.",
+                    show_alert=True,
+                )
                 return
             await target.answer("Brak wymaganych danych – zacznij od nowa poleceniem /start.")
             return
@@ -1010,7 +2420,7 @@ def build_dispatcher(
                     f"{exc}. Zaktualizuj limity w .env lub dezaktywuj istniejącego bota."
                 )
                 if isinstance(target, CallbackQuery):
-                    await target.answer(str(exc), show_alert=True)
+                    await _safe_callback_answer(target, str(exc), show_alert=True)
                     if target.message:
                         await target.message.answer(warning)
                 else:
@@ -1040,7 +2450,7 @@ def build_dispatcher(
         summary = "\n".join(summary_lines)
 
         if isinstance(target, CallbackQuery):
-            await target.answer()
+            await _safe_callback_answer(target)
             if target.message:
                 await target.message.answer(summary, reply_markup=_main_menu_keyboard().as_markup())
         else:
@@ -1061,7 +2471,11 @@ def build_dispatcher(
                 "Brak wybranego bota. Wywołaj menu główne i spróbuj jeszcze raz."
             )
             if isinstance(target, CallbackQuery):
-                await target.answer("Brak wybranego bota.", show_alert=True)
+                await _safe_callback_answer(
+                    target,
+                    "Brak wybranego bota.",
+                    show_alert=True,
+                )
                 if target.message:
                     await target.message.answer(message_text, reply_markup=_main_menu_keyboard().as_markup())
             else:
@@ -1083,7 +2497,11 @@ def build_dispatcher(
                     "Nie znaleziono bota w bazie. Możliwe, że został usunięty w międzyczasie."
                 )
                 if isinstance(target, CallbackQuery):
-                    await target.answer("Nie znaleziono bota.", show_alert=True)
+                    await _safe_callback_answer(
+                        target,
+                        "Nie znaleziono bota.",
+                        show_alert=True,
+                    )
                     if target.message:
                         await target.message.answer(
                             message_text, reply_markup=_main_menu_keyboard().as_markup()
@@ -1109,7 +2527,7 @@ def build_dispatcher(
                 )
                 await state.set_state(EditBotStates.waiting_token)
                 if isinstance(target, CallbackQuery):
-                    await target.answer(str(exc), show_alert=True)
+                    await _safe_callback_answer(target, str(exc), show_alert=True)
                     if target.message:
                         await target.message.answer(warning)
                 else:
@@ -1147,7 +2565,7 @@ def build_dispatcher(
         summary = "\n".join(summary_lines)
 
         if isinstance(target, CallbackQuery):
-            await target.answer()
+            await _safe_callback_answer(target)
             if target.message:
                 await target.message.answer(summary, reply_markup=_main_menu_keyboard().as_markup())
         else:
@@ -1197,7 +2615,97 @@ def build_dispatcher(
         cleaned = re.sub(r"/[-_\w]+(?:@[-_\w]+)?", " ", cleaned)
         return " ".join(cleaned.split())
 
-    def _collect_message_context(message: Message, username: Optional[str]) -> str:
+    def _has_forward_metadata(message: Message) -> bool:
+        if getattr(message, "forward_date", None):
+            return True
+
+        forward_related_attributes = (
+            "forward_origin",
+            "forward_from",
+            "forward_from_chat",
+            "forward_sender_name",
+            "forward_signature",
+            "forward_from_message_id",
+        )
+        for attribute in forward_related_attributes:
+            if getattr(message, attribute, None) is not None:
+                return True
+        return False
+
+    def _extract_forwarded_author(
+        message: Message,
+    ) -> tuple[Optional[int], Optional[str], Optional[str]]:
+        user_id: Optional[int] = None
+        username: Optional[str] = None
+        display_name: Optional[str] = None
+
+        forward_from = getattr(message, "forward_from", None)
+        if forward_from is not None:
+            user_id = getattr(forward_from, "id", None) or user_id
+            username = getattr(forward_from, "username", None) or username
+            display_name = getattr(forward_from, "full_name", None) or display_name
+
+        forward_origin = getattr(message, "forward_origin", None)
+        if forward_origin is not None:
+            sender_user = getattr(forward_origin, "sender_user", None)
+            if sender_user is not None:
+                user_id = getattr(sender_user, "id", None) or user_id
+                username = getattr(sender_user, "username", None) or username
+                full_name = getattr(sender_user, "full_name", None)
+                if full_name:
+                    display_name = full_name
+                else:
+                    first_name = getattr(sender_user, "first_name", None)
+                    last_name = getattr(sender_user, "last_name", None)
+                    combined = " ".join(
+                        part for part in (first_name, last_name) if part
+                    ).strip()
+                    if combined:
+                        display_name = combined
+            sender_name = getattr(forward_origin, "sender_name", None)
+            if sender_name:
+                display_name = display_name or sender_name
+
+        sender_name = getattr(message, "forward_sender_name", None)
+        if sender_name:
+            display_name = display_name or sender_name
+
+        return user_id, username, display_name
+
+    def _describe_message(message: Message) -> str:
+        chat = getattr(message, "chat", None)
+        chat_id = getattr(chat, "id", None)
+        chat_type = getattr(chat, "type", None)
+        user = getattr(message, "from_user", None)
+        user_id = getattr(user, "id", None)
+        username = getattr(user, "username", None)
+        full_name = getattr(user, "full_name", None)
+        forward_flag = _has_forward_metadata(message)
+        return (
+            "message_id=%s chat_id=%s chat_type=%s from_id=%s username=%s name=%s forward=%s"
+            % (
+                getattr(message, "message_id", None),
+                chat_id,
+                chat_type,
+                user_id,
+                username,
+                full_name,
+                forward_flag,
+            )
+        )
+
+    def _extract_user_plain_text(message: Message) -> str:
+        raw_text = (message.text or message.caption or "").strip()
+        if raw_text:
+            return raw_text
+
+        content_type = getattr(message, "content_type", None)
+        if content_type and content_type != "text":
+            return f"<{content_type}>"
+
+        return "<pusta wiadomość>"
+
+    async def _collect_message_context(message: Message, username: Optional[str]) -> str:
         parts: list[str] = []
         primary_text = message.text or message.caption or ""
         cleaned_primary = _strip_bot_mentions(primary_text, username)
@@ -1205,24 +2713,29 @@ def build_dispatcher(
             parts.append(cleaned_primary)
 
         reply = message.reply_to_message
+        include_reply_text = True
         if reply:
+            if reply.from_user is not None and reply.from_user.is_bot:
+                bot_id, _ = await _get_bot_identity(message.bot)
+                if reply.from_user.id == bot_id:
+                    include_reply_text = False
             reply_text = reply.text or reply.caption or ""
-            if reply_text:
+            if include_reply_text and reply_text:
                 parts.append(reply_text)
 
         combined = "\n".join(part for part in parts if part).strip()
-        if not combined and reply:
+        if not combined and reply and include_reply_text:
             combined = (reply.text or reply.caption or "").strip()
         return combined
 
     async def _is_direct_invocation(message: Message) -> bool:
+        def _contains_media_payload(msg: Message) -> bool:
+            media_attributes = ("photo", "animation", "video", "video_note")
+            return any(getattr(msg, attribute, None) for attribute in media_attributes)
+
         content = (message.text or message.caption or "").strip()
-        if not content:
-            return False
 
         chat_type = getattr(message.chat, "type", "")
-        if chat_type == "private":
-            return True
 
         bot_id, username = await _get_bot_identity()
 
@@ -1233,50 +2746,195 @@ def build_dispatcher(
             and reply.from_user.is_bot
             and reply.from_user.id == bot_id
         ):
-            return True
+            if content:
+                return True
+            if _contains_media_payload(message):
+                logger.debug(
+                    "Wiadomość %s jest odpowiedzią z materiałem multimedialnym – traktujemy ją jako wywołanie bota.",
+                    _describe_message(message),
+                )
+                return True
+            return False
+
+        if not content:
+            return False
+
+        normalized_username = username.lower() if username else None
 
         def _check_entities(entities: Optional[list], text: str) -> bool:
             if not entities or not text:
                 return False
             for entity in entities:
-                snippet = text[entity.offset : entity.offset + entity.length]
-                entity_type = getattr(entity, "type", "")
-                if entity_type == "mention" and username and snippet.lower() == f"@{username}":
+                try:
+                    snippet = entity.extract_from(text)
+                except Exception:  # pragma: no cover - defensywny fallback
+                    snippet = text[entity.offset : entity.offset + entity.length]
+                entity_type = normalize_entity_type(getattr(entity, "type", ""))
+                if (
+                    entity_type.endswith("mention")
+                    and normalized_username
+                    and snippet.lower() == f"@{normalized_username}"
+                ):
                     return True
-                if entity_type == "text_mention" and getattr(entity, "user", None):
+                if entity_type.endswith("text_mention") and getattr(entity, "user", None):
                     if entity.user.id == bot_id:
                         return True
-                if entity_type == "bot_command":
+                if entity_type.endswith("bot_command"):
+                    if is_command_addressed_to_bot(snippet, normalized_username):
+                        return True
                     command = snippet.lower()
-                    if username and command.endswith(f"@{username}"):
+                    if normalized_username and command.endswith(
+                        f"@{normalized_username}"
+                    ):
                         return True
                     if chat_type == "private":
                         return True
             return False
 
+        has_forward_metadata = _has_forward_metadata(message)
+
         if _check_entities(message.entities, message.text or ""):
+            if has_forward_metadata:
+                logger.debug(
+                    "Wiadomość %s zawiera metadane przekazania, ale wykryto wyraźną komendę – traktujemy ją jako wywołanie bota.",
+                    _describe_message(message),
+                )
             return True
         if _check_entities(message.caption_entities, message.caption or ""):
+            if has_forward_metadata:
+                logger.debug(
+                    "Wiadomość %s zawiera metadane przekazania, ale wykryto wyraźną komendę w podpisie – traktujemy ją jako wywołanie bota.",
+                    _describe_message(message),
+                )
             return True
 
-        if username and f"@{username}" in content.lower():
+        if contains_explicit_mention(content, username or normalized_username):
+            if has_forward_metadata:
+                logger.debug(
+                    "Wiadomość %s zawiera metadane przekazania, ale odnaleziono bezpośrednie wspomnienie bota – traktujemy ją jako wywołanie.",
+                    _describe_message(message),
+                )
             return True
+
+        if has_forward_metadata:
+            logger.debug(
+                "Wiadomość %s zawiera metadane przekazania – nie traktujemy jej jako wywołania bota.",
+                _describe_message(message),
+            )
+            # Przekazane wiadomości bez jawnej komendy traktujemy jak zgłoszenia do
+            # moderacji, aby zachować dotychczasowy model przesyłania cytatów.
+            return False
+
+        if chat_type == "private":
+            # W prywatnych wiadomościach brak wyraźnej komendy traktujemy jako zgłoszenie cytatu.
+            return False
 
         return False
 
     async def _reply_with_quote(message: Message, quote: Quote) -> None:
         text_payload = (quote.text_content or "").strip() or "…"
+
+        reply_target: Optional[Message] = None
+        base_send_kwargs: dict[str, Any] = {"chat_id": message.chat.id}
+
+        reply_to_message = getattr(message, "reply_to_message", None)
+        if isinstance(reply_to_message, Message):
+            candidate = reply_to_message
+            should_reply_to_candidate = True
+            from_user = getattr(candidate, "from_user", None)
+            if from_user is not None and from_user.is_bot:
+                bot_id, _ = await _get_bot_identity(message.bot)
+                if from_user.id == bot_id:
+                    should_reply_to_candidate = False
+            if should_reply_to_candidate:
+                reply_target = candidate
+
+        thread_id = getattr(message, "message_thread_id", None)
+        chat = getattr(message, "chat", None)
+        chat_supports_threads = bool(getattr(chat, "is_forum", False))
+        if thread_id is not None and chat_supports_threads:
+            base_send_kwargs["message_thread_id"] = thread_id
+
+        if reply_target is None:
+            reply_target = message
+
+        def _build_send_kwargs(use_thread: bool = True) -> dict[str, Any]:
+            kwargs = dict(base_send_kwargs)
+            if not use_thread:
+                kwargs.pop("message_thread_id", None)
+            return kwargs
+
+        async def _send_text() -> None:
+            if reply_target is not None:
+                await reply_target.reply(text_payload)
+            else:
+                await message.bot.send_message(text=text_payload, **_build_send_kwargs())
+
+        async def _send_photo() -> None:
+            if reply_target is not None:
+                await reply_target.reply_photo(
+                    quote.file_id,
+                    caption=text_payload if quote.text_content else None,
+                )
+            else:
+                await message.bot.send_photo(
+                    quote.file_id,
+                    caption=text_payload if quote.text_content else None,
+                    **_build_send_kwargs(),
+                )
+
+        async def _send_audio() -> None:
+            if reply_target is not None:
+                await reply_target.reply_audio(
+                    quote.file_id,
+                    caption=text_payload if quote.text_content else None,
+                )
+            else:
+                await message.bot.send_audio(
+                    quote.file_id,
+                    caption=text_payload if quote.text_content else None,
+                    **_build_send_kwargs(),
+                )
+
         try:
             if quote.media_type == MediaType.TEXT or not quote.file_id:
-                await message.answer(text_payload)
+                await _send_text()
             elif quote.media_type == MediaType.IMAGE:
-                await message.answer_photo(quote.file_id, caption=text_payload if quote.text_content else None)
+                await _send_photo()
             elif quote.media_type == MediaType.AUDIO:
-                await message.answer_audio(quote.file_id, caption=text_payload if quote.text_content else None)
+                await _send_audio()
             else:
-                await message.answer(text_payload)
+                await _send_text()
         except TelegramBadRequest:
-            await message.answer(text_payload)
+            if "message_thread_id" in base_send_kwargs:
+                logger.warning(
+                    "Nie udało się wysłać wiadomości w wątku %s – próbuję bez wątku.",
+                    base_send_kwargs["message_thread_id"],
+                )
+                if quote.media_type == MediaType.TEXT or not quote.file_id:
+                    await message.bot.send_message(
+                        text=text_payload,
+                        **_build_send_kwargs(use_thread=False),
+                    )
+                elif quote.media_type == MediaType.IMAGE:
+                    await message.bot.send_photo(
+                        quote.file_id,
+                        caption=text_payload if quote.text_content else None,
+                        **_build_send_kwargs(use_thread=False),
+                    )
+                elif quote.media_type == MediaType.AUDIO:
+                    await message.bot.send_audio(
+                        quote.file_id,
+                        caption=text_payload if quote.text_content else None,
+                        **_build_send_kwargs(use_thread=False),
+                    )
+                else:
+                    await message.bot.send_message(
+                        text=text_payload,
+                        **_build_send_kwargs(use_thread=False),
+                    )
+            else:
+                raise
 
     async def _resolve_language_priority(persona_language: Optional[str], message: Message) -> list[str]:
         priority: list[str] = []
@@ -1300,13 +2958,19 @@ def build_dispatcher(
     public_router = Router(name=f"public-router-{bot_id or 'default'}")
     public_router.message.filter(lambda message: not _is_admin_chat_id(message.chat.id))
 
-    @public_router.message(F.text | F.caption)
+    @public_router.message(F.text | F.caption | F.photo | F.animation | F.video)
     async def handle_public_invocation(message: Message) -> None:
         if await _is_message_from_current_bot(message):
             return
 
+        logger.debug("Odebrano potencjalne wywołanie publiczne: %s", _describe_message(message))
+
         if not await _is_direct_invocation(message):
-            return
+            logger.debug(
+                "Wiadomość %s nie została zakwalifikowana jako wywołanie bota – przekazujemy dalej.",
+                _describe_message(message),
+            )
+            raise SkipHandler()
 
         if bot_id is None:
             await message.answer("Ten bot nie jest jeszcze skonfigurowany – brak powiązanej persony.")
@@ -1321,7 +2985,7 @@ def build_dispatcher(
 
             bot_identity = await _get_bot_identity()
             _, username = bot_identity
-            query = _collect_message_context(message, username)
+            query = await _collect_message_context(message, username)
 
             language_priority = await _resolve_language_priority(persona.language, message)
             quote = await quotes_service.select_relevant_quote(
@@ -1335,7 +2999,22 @@ def build_dispatcher(
             await message.answer("Niestety, nie znalazłem odpowiedniego cytatu.")
             return
 
+        chat_identifier = getattr(message.chat, "id", None)
+        thread_identifier = getattr(message, "message_thread_id", None)
+        signature = _build_quote_signature(quote)
+        if _is_duplicate_chat_response(chat_identifier, thread_identifier, signature):
+            logger.info(
+                "Pomijam duplikat odpowiedzi dla czatu %s (wątek=%s)",
+                chat_identifier,
+                thread_identifier,
+            )
+            await message.answer(
+                "W ciągu ostatnich 5 minut udzieliłem już identycznej odpowiedzi. Pomijam duplikat."
+            )
+            return
+
         await _reply_with_quote(message, quote)
+        _remember_chat_response(chat_identifier, thread_identifier, signature)
 
     dispatcher.include_router(admin_router)
     dispatcher.include_router(public_router)
@@ -1351,10 +3030,25 @@ def build_dispatcher(
             return
 
         if message.from_user is None:
+            sender_chat = getattr(message, "sender_chat", None)
+            sender_chat_type = getattr(sender_chat, "type", None)
+            if sender_chat_type == "channel":
+                logger.debug(
+                    "Pomijamy wiadomość %s – została opublikowana w imieniu kanału.",
+                    _describe_message(message),
+                )
+                return
+
             await message.answer("Nie udało się rozpoznać nadawcy wiadomości.")
             return
 
+        logger.debug("Odebrano wiadomość od użytkownika: %s", _describe_message(message))
+
         if await _is_message_from_current_bot(message):
+            logger.debug(
+                "Pomijamy wiadomość %s, ponieważ pochodzi od bieżącego bota.",
+                _describe_message(message),
+            )
             return
 
         text_content: Optional[str] = None
@@ -1362,11 +3056,43 @@ def build_dispatcher(
         media_type_enum: Optional[MediaType] = None
         submitted_by_username: Optional[str] = message.from_user.username
         submitted_by_name: Optional[str] = message.from_user.full_name
+        quoted_user_id: Optional[int] = None
+        quoted_username: Optional[str] = None
+        quoted_name: Optional[str] = None
+
+        if not _has_forward_metadata(message):
+            user_text = _extract_user_plain_text(message)
+            logger.info(
+                "Pomijamy wiadomość %s – brak metadanych przekazania (nie jest przekierowaniem do bota). Treść użytkownika: %s",
+                _describe_message(message),
+                user_text,
+            )
+            await message.answer(
+                "Aby dodać ten cytat, przekaż (forwarduj) wiadomość zawierającą go bezpośrednio do bota. "
+                "Własnoręcznie wpisany tekst nie wystarczy.\n"
+                "Jeśli zaznaczysz kilka wiadomości i wyślesz je w jednym przekazaniu, bot spróbuje je scalić w sensowną wypowiedź.\n"
+                "Możesz też mieć takiego bota, o szczegóły pytaj na czacie kanału Polska Sztuka Wojny. "
+                "<a href=\"https://t.me/sztuka_wojny\">Polska Sztuka Wojny</a>.",
+            )
+            return
+
+        quoted_user_id, quoted_username, quoted_name = _extract_forwarded_author(message)
+
+        if message.content_type in _MEMBERSHIP_EVENT_CONTENT_TYPES:
+            logger.debug(
+                "Pomijamy wiadomość serwisową %s dotyczącą zmian w członkostwie.",
+                _describe_message(message),
+            )
+            return
 
         if message.text:
             text_content = message.text.strip()
             if not text_content:
                 await message.answer("Wyślij proszę treść cytatu w wiadomości tekstowej.")
+                logger.debug(
+                    "Wiadomość %s została odrzucona – pusta treść tekstowa.",
+                    _describe_message(message),
+                )
                 return
             media_type_enum = MediaType.TEXT
         elif message.photo:
@@ -1388,56 +3114,218 @@ def build_dispatcher(
             await message.answer(
                 "Obecnie przyjmuję tylko tekst, zdjęcia lub nagrania audio. Wyślij cytat w jednym z tych formatów."
             )
+            logger.debug(
+                "Wiadomość %s została odrzucona – nieobsługiwany typ treści.",
+                _describe_message(message),
+            )
             return
 
         if media_type_enum is None:
             await message.answer("Nie udało się rozpoznać typu wiadomości.")
+            logger.debug(
+                "Wiadomość %s została odrzucona – nie rozpoznano typu wiadomości.",
+                _describe_message(message),
+            )
             return
 
-        async with get_session() as session:
-            submission = await moderation_service.create_submission(
-                session,
-                persona_id=current_persona_id,
-                submitted_by_user_id=message.from_user.id,
-                submitted_chat_id=message.chat.id,
-                submitted_by_username=submitted_by_username,
-                submitted_by_name=submitted_by_name,
-                media_type=media_type_enum,
-                text_content=text_content,
-                file_id=file_id,
-            )
-            await session.commit()
-            submission_snapshot = _snapshot_submission(submission)
+        duplicate_notice: Optional[dict[str, Any]] = None
+        submission: Optional[Submission] = None
+        submission_snapshot: Optional[dict[str, Any]] = None
+        merged_into_existing = False
 
-        await message.answer("Dziękujemy! Twoja propozycja trafiła do kolejki moderacji.")
+        async with get_session() as session:
+            recent_submission: Optional[Submission] = None
+            target_text = text_content
+
+            if (
+                current_persona_id is not None
+                and media_type_enum == MediaType.TEXT
+                and text_content
+            ):
+                recent_submission = await moderation_service.find_recent_text_submission(
+                    session,
+                    persona_id=current_persona_id,
+                    submitted_by_user_id=message.from_user.id,
+                    submitted_chat_id=message.chat.id,
+                    max_age=USER_SUBMISSION_MERGE_WINDOW,
+                    lock_for_update=True,
+                )
+                if recent_submission is not None:
+                    target_text = _merge_submission_text(
+                        recent_submission.text_content,
+                        text_content,
+                    )
+
+            duplicate_payload = target_text if media_type_enum == MediaType.TEXT else text_content
+            duplicate_file_id = file_id
+            if recent_submission is not None:
+                duplicate_file_id = recent_submission.file_id
+
+            if current_persona_id is not None:
+                duplicate_result = await quotes_service.find_exact_duplicate(
+                    session,
+                    persona_id=current_persona_id,
+                    media_type=media_type_enum,
+                    text_content=duplicate_payload,
+                    file_id=duplicate_file_id,
+                )
+                if duplicate_result is not None:
+                    duplicate_quote, match_type = duplicate_result
+                    duplicate_notice = {
+                        "id": duplicate_quote.id,
+                        "match_type": match_type,
+                        "text_preview": (duplicate_quote.text_content or "").strip() or None,
+                        "media_type": (
+                            duplicate_quote.media_type.value
+                            if isinstance(duplicate_quote.media_type, MediaType)
+                            else duplicate_quote.media_type
+                        ),
+                        "file_id": duplicate_quote.file_id,
+                    }
+                    logger.info(
+                        "Odrzucono wiadomość %s – duplikat istniejącego cytatu #%s (match_type=%s).",
+                        _describe_message(message),
+                        duplicate_quote.id,
+                        match_type,
+                    )
+
+            if duplicate_notice is None:
+                if recent_submission is not None:
+                    recent_submission.text_content = target_text
+                    if submitted_by_username:
+                        recent_submission.submitted_by_username = submitted_by_username
+                    if submitted_by_name:
+                        recent_submission.submitted_by_name = submitted_by_name
+                    if quoted_user_id is not None:
+                        recent_submission.quoted_user_id = quoted_user_id
+                    if quoted_username:
+                        recent_submission.quoted_username = quoted_username
+                    if quoted_name:
+                        recent_submission.quoted_name = quoted_name
+                    submission = recent_submission
+                    merged_into_existing = True
+                    await session.flush()
+                else:
+                    submission = await moderation_service.create_submission(
+                        session,
+                        persona_id=current_persona_id,
+                        submitted_by_user_id=message.from_user.id,
+                        submitted_chat_id=message.chat.id,
+                        submitted_by_username=submitted_by_username,
+                        submitted_by_name=submitted_by_name,
+                        quoted_user_id=quoted_user_id,
+                        quoted_username=quoted_username,
+                        quoted_name=quoted_name,
+                        media_type=media_type_enum,
+                        text_content=text_content,
+                        file_id=file_id,
+                    )
+                await session.commit()
+                submission_snapshot = await _snapshot_submission(session, submission)
+
+        if duplicate_notice is not None:
+            match_labels = {
+                "text": "treści",
+                "file_id": "identyfikatora pliku",
+                "file_hash": "hashu pliku",
+            }
+            match_label = match_labels.get(duplicate_notice["match_type"], "zawartości")
+            response_lines = [
+                "🔁 Ten cytat jest już w naszej bazie – nie dodaliśmy nowego zgłoszenia.",
+                f"Znaleziono dopasowanie na podstawie {match_label} (ID: <code>{duplicate_notice['id']}</code>).",
+            ]
+            preview = duplicate_notice.get("text_preview")
+            if preview:
+                response_lines.append("")
+                response_lines.append(f"Podgląd: <i>{html.escape(preview[:200])}</i>")
+
+            await message.answer("\n".join(response_lines))
+
+            if admin_chat_id and message.chat.id != admin_chat_id:
+                persona_name, _ = await _ensure_persona_details()
+                admin_lines = [
+                    "♻️ <b>Zgłoszenie odrzucone automatycznie – duplikat</b>",
+                    f"Persona: <i>{html.escape(persona_name or str(current_persona_id))}</i>",
+                    f"Użytkownik: <code>{message.from_user.id}</code>",
+                    f"Czat: <code>{message.chat.id}</code>",
+                    f"Typ: <code>{html.escape(media_type_enum.value)}</code>",
+                    f"Dopasowanie na podstawie {match_label}.",
+                    f"Istniejący cytat: <code>{duplicate_notice['id']}</code>",
+                ]
+                duplicate_file_id = duplicate_notice.get("file_id")
+                if duplicate_file_id:
+                    admin_lines.append(f"Plik: <code>{html.escape(duplicate_file_id)}</code>")
+                if preview:
+                    admin_lines.append("")
+                    admin_lines.append(html.escape(preview[:200]))
+                await message.bot.send_message(admin_chat_id, "\n".join(admin_lines))
+
+            return
+
+        assert submission is not None and submission_snapshot is not None
+
+        if merged_into_existing:
+            logger.info(
+                "Zaktualizowano zgłoszenie #%s treścią z wiadomości %s.",
+                submission.id,
+                _describe_message(message),
+            )
+            await message.answer(
+                "Dziękujemy! Zaktualizowaliśmy Twoje poprzednie zgłoszenie – całość trafiła do kolejki moderacji."
+            )
+        else:
+            logger.info(
+                "Przekazano wiadomość %s do kolejki moderacyjnej jako zgłoszenie #%s.",
+                _describe_message(message),
+                submission.id,
+            )
+            await message.answer("Dziękujemy! Twoja propozycja trafiła do kolejki moderacji.")
 
         if admin_chat_id and message.chat.id != admin_chat_id:
             persona_name, _ = await _ensure_persona_details()
-            preview = text_content or ("[obraz]" if media_type_enum == MediaType.IMAGE else "[audio]")
-            summary_lines = [
-                "📥 <b>Nowe zgłoszenie do moderacji</b>",
-                f"ID: <code>{submission.id}</code>",
-                f"Persona: <i>{html.escape(persona_name or str(current_persona_id))}</i>",
-                f"Użytkownik: <code>{message.from_user.id}</code>",
-                f"Czat: <code>{message.chat.id}</code>",
-                f"Typ: <code>{media_type_enum.value}</code>",
-            ]
-            if submitted_by_username:
-                username_clean = submitted_by_username[1:] if submitted_by_username.startswith("@") else submitted_by_username
-                if username_clean:
-                    summary_lines.append(f"Alias: <code>@{html.escape(username_clean)}</code>")
-            if submitted_by_name:
-                summary_lines.append(f"Nazwa: <i>{html.escape(submitted_by_name)}</i>")
-            if preview:
-                summary_lines.append("")
-                summary_lines.append(html.escape(preview[:200]))
             snapshot = submission_snapshot
             if persona_name:
                 snapshot["persona_name"] = persona_name
+
+            media_value = snapshot.get("media_type", media_type_enum.value)
             try:
-                await _notify_submission(message.bot, admin_chat_id, snapshot)
-            except TelegramBadRequest:
-                pass
+                final_media_type = MediaType(media_value)
+            except ValueError:
+                final_media_type = media_type_enum
+
+            final_text = (snapshot.get("text_content") or "").strip()
+            preview = final_text or (
+                "[obraz]" if final_media_type == MediaType.IMAGE else "[audio]" if final_media_type == MediaType.AUDIO else ""
+            )
+
+            if merged_into_existing:
+                admin_lines = [
+                    "✏️ <b>Zaktualizowano zgłoszenie do moderacji</b>",
+                    f"ID: <code>{submission.id}</code>",
+                    f"Persona: <i>{html.escape(persona_name or str(current_persona_id))}</i>",
+                    f"Użytkownik: <code>{message.from_user.id}</code>",
+                    f"Czat: <code>{message.chat.id}</code>",
+                    f"Typ: <code>{final_media_type.value}</code>",
+                ]
+                if submitted_by_username:
+                    username_clean = (
+                        submitted_by_username[1:]
+                        if submitted_by_username.startswith("@")
+                        else submitted_by_username
+                    )
+                    if username_clean:
+                        admin_lines.append(f"Alias: <code>@{html.escape(username_clean)}</code>")
+                if submitted_by_name:
+                    admin_lines.append(f"Nazwa: <i>{html.escape(submitted_by_name)}</i>")
+                if preview:
+                    admin_lines.append("")
+                    admin_lines.append(html.escape(preview[:200]))
+                await message.bot.send_message(admin_chat_id, "\n".join(admin_lines))
+            else:
+                try:
+                    await _notify_submission(message.bot, admin_chat_id, snapshot)
+                except TelegramBadRequest:
+                    pass
 
     dispatcher.include_router(user_router)
 

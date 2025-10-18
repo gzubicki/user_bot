@@ -71,7 +71,13 @@ class Persona(Base):
     is_active: Mapped[bool] = mapped_column(Boolean, default=True, nullable=False)
 
     aliases: Mapped[list["PersonaAlias"]] = relationship("PersonaAlias", back_populates="persona")
-    identities: Mapped[list["PersonaIdentity"]] = relationship("PersonaIdentity", back_populates="persona")
+    identities: Mapped[list["PersonaIdentity"]] = relationship(
+        "PersonaIdentity",
+        back_populates="persona",
+        cascade="all, delete-orphan",
+        passive_deletes=True,
+        order_by="PersonaIdentity.id",
+    )
     bots: Mapped[list[Bot]] = relationship("Bot", back_populates="persona")
 
 
@@ -133,6 +139,9 @@ class Submission(Base):
     submitted_chat_id: Mapped[int] = mapped_column(BigInteger, nullable=False)
     submitted_by_username: Mapped[Optional[str]] = mapped_column(String(255), nullable=True)
     submitted_by_name: Mapped[Optional[str]] = mapped_column(String(255), nullable=True)
+    quoted_user_id: Mapped[Optional[int]] = mapped_column(BigInteger, nullable=True)
+    quoted_username: Mapped[Optional[str]] = mapped_column(String(255), nullable=True)
+    quoted_name: Mapped[Optional[str]] = mapped_column(String(255), nullable=True)
     media_type: Mapped[MediaType] = mapped_column(
         Enum(
             MediaType,
