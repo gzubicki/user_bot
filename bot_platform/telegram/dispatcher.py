@@ -2919,6 +2919,12 @@ def build_dispatcher(
                 _describe_message(message),
                 user_text,
             )
+            await message.answer(
+                "Aby dodać ten cytat, przekaż (forwarduj) wiadomość zawierającą go bezpośrednio do bota. "
+                "Własnoręcznie wpisany tekst nie wystarczy.\n"
+                "Możesz też mieć takiego bota, o szczegóły pytaj na czacie kanału Polska Sztuka Wojny. "
+                "<a href=\"https://t.me/sztuka_wojny\">Polska Sztuka Wojny</a>.",
+            )
             return
 
         quoted_user_id, quoted_username, quoted_name = _extract_forwarded_author(message)
