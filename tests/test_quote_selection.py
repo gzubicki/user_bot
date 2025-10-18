@@ -31,10 +31,11 @@ async def test_select_relevant_quote_uses_random_quote_for_empty_query(monkeypat
     async def fake_search(*args, **kwargs):
         raise AssertionError("search_quotes_by_relevance nie powinno być wywołane")
 
-    async def fake_random_quote(session, persona_arg, *, language_priority):
+    async def fake_random_quote(session, persona_arg, *, language_priority, media_types=None):
         assert session is None
         assert persona_arg is persona
         assert language_priority is None
+        assert media_types is None
         return expected
 
     monkeypatch.setattr(quotes_service, "search_quotes_by_relevance", fake_search)
@@ -58,8 +59,9 @@ async def test_select_relevant_quote_falls_back_to_unfiltered_random(monkeypatch
     async def fake_search(*args, **kwargs):
         raise AssertionError("search_quotes_by_relevance nie powinno być wywołane")
 
-    async def fake_random_quote(session, persona_arg, *, language_priority):
+    async def fake_random_quote(session, persona_arg, *, language_priority, media_types=None):
         attempts.append(language_priority)
+        assert media_types is None
         if language_priority:
             return None
         return _StubQuote(99, "Fallback")
@@ -88,8 +90,9 @@ async def test_select_relevant_quote_prefers_best_match_for_query(monkeypatch):
         assert query == "szukaj"
         return others
 
-    async def fake_random_quote(session, persona_arg, *, language_priority):
+    async def fake_random_quote(session, persona_arg, *, language_priority, media_types=None):
         assert language_priority is None
+        assert media_types is None
         raise AssertionError("random_quote nie powinien zostać wywołany")
 
     monkeypatch.setattr(quotes_service, "search_quotes_by_relevance", fake_search)

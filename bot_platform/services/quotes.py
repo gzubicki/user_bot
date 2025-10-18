@@ -142,36 +142,69 @@ async def count_quotes(session: AsyncSession, persona: Persona) -> int:
     return total
 
 
+def _prepare_media_types(media_types: Optional[Sequence[MediaType]]) -> tuple[MediaType, ...]:
+    if not media_types:
+        return tuple()
+
+    prepared: list[MediaType] = []
+    seen: set[MediaType] = set()
+    for media_type in media_types:
+        try:
+            normalized = (
+                media_type
+                if isinstance(media_type, MediaType)
+                else MediaType(str(media_type))
+            )
+        except ValueError:
+            logger.debug("Ignoruję nieobsługiwany typ nośnika: %s", media_type)
+            continue
+        if normalized in seen:
+            continue
+        seen.add(normalized)
+        prepared.append(normalized)
+    return tuple(prepared)
+
+
 async def random_quote(
     session: AsyncSession,
     persona: Persona,
     *,
     language_priority: Optional[Sequence[str]] = None,
+    media_types: Optional[Sequence[MediaType]] = None,
 ) -> Optional[Quote]:
     prepared_languages = _prepare_language_priority(language_priority)
+    prepared_media_types = _prepare_media_types(media_types)
 
     stmt = select(Quote).where(Quote.persona_id == persona.id)
     if prepared_languages:
         stmt = stmt.where(Quote.language.in_([*prepared_languages, "auto"]))
+    if prepared_media_types:
+        stmt = stmt.where(Quote.media_type.in_(prepared_media_types))
     stmt = stmt.order_by(func.random()).limit(1)
     result = await session.execute(stmt)
     quote = result.scalars().first()
     if quote is None:
-        if prepared_languages:
+        if prepared_languages or prepared_media_types:
             logger.debug(
-                "Brak cytatów dla persony ID=%s spełniających preferencje językowe: %s",
+                "Brak cytatów dla persony ID=%s spełniających preferencje językowe: %s i typów: %s",
                 persona.id,
-                ", ".join(prepared_languages),
+                ", ".join(prepared_languages) if prepared_languages else "—",
+                ", ".join(mt.value for mt in prepared_media_types) if prepared_media_types else "—",
             )
         else:
             logger.warning("Brak cytatów dla persony ID=%s", persona.id)
     else:
+        details: list[str] = []
         if prepared_languages:
+            details.append(", ".join(prepared_languages))
+        if prepared_media_types:
+            details.append(", ".join(mt.value for mt in prepared_media_types))
+        if details:
             logger.debug(
-                "Wylosowano cytat ID=%s dla persony ID=%s (preferencje językowe: %s)",
+                "Wylosowano cytat ID=%s dla persony ID=%s (preferencje: %s)",
                 quote.id,
                 persona.id,
-                ", ".join(prepared_languages),
+                "; ".join(details),
             )
         else:
             logger.debug("Wylosowano cytat ID=%s dla persony ID=%s", quote.id, persona.id)

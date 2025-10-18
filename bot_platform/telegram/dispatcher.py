@@ -6,7 +6,7 @@ import logging
 import re
 from dataclasses import dataclass
 from datetime import UTC, datetime, timedelta
-from typing import Any, Iterable, Optional
+from typing import Any, Iterable, Optional, Sequence
 
 from sqlalchemy.ext.asyncio import AsyncSession
 
@@ -2936,6 +2936,47 @@ def build_dispatcher(
             else:
                 raise
 
+    async def _select_duplicate_alternative_quote(
+        persona_id: int,
+        *,
+        language_priority: Sequence[str],
+        duplicate_signature: QuoteSignature,
+    ) -> Optional[Quote]:
+        attempts_per_media_type = 5
+        media_priorities: list[tuple[MediaType, ...] | None] = [
+            (MediaType.IMAGE,),
+            None,
+        ]
+
+        async with get_session() as session:
+            persona = await personas_service.get_persona_by_id(session, persona_id)
+            if persona is None:
+                logger.warning(
+                    "Nie udało się odczytać persony ID=%s na potrzeby alternatywnej odpowiedzi.",
+                    persona_id,
+                )
+                return None
+
+            for media_filter in media_priorities:
+                for _ in range(attempts_per_media_type):
+                    candidate = await quotes_service.random_quote(
+                        session,
+                        persona,
+                        language_priority=language_priority,
+                        media_types=media_filter,
+                    )
+                    if candidate is None:
+                        break
+                    candidate_signature = _build_quote_signature(candidate)
+                    if candidate_signature != duplicate_signature:
+                        return candidate
+
+        logger.info(
+            "Brak alternatywnego cytatu do zastąpienia duplikatu (persona_id=%s).",
+            persona_id,
+        )
+        return None
+
     async def _resolve_language_priority(persona_language: Optional[str], message: Message) -> list[str]:
         priority: list[str] = []
         user_language = getattr(message.from_user, "language_code", None)
@@ -2976,12 +3017,16 @@ def build_dispatcher(
             await message.answer("Ten bot nie jest jeszcze skonfigurowany – brak powiązanej persony.")
             return
 
+        persona_id: Optional[int] = None
+
         async with get_session() as session:
             bot_record = await bots_service.get_bot_by_id(session, bot_id)
             persona = bot_record.persona if bot_record else None
             if persona is None:
                 await message.answer("Nie odnaleziono persony bota ani powiązanych cytatów.")
                 return
+
+            persona_id = persona.id
 
             bot_identity = await _get_bot_identity()
             _, username = bot_identity
@@ -3008,8 +3053,26 @@ def build_dispatcher(
                 chat_identifier,
                 thread_identifier,
             )
-            await message.answer(
-                "W ciągu ostatnich 5 minut udzieliłem już identycznej odpowiedzi. Pomijam duplikat."
+            alternative_quote: Optional[Quote] = None
+            if persona_id is not None:
+                alternative_quote = await _select_duplicate_alternative_quote(
+                    persona_id,
+                    language_priority=language_priority,
+                    duplicate_signature=signature,
+                )
+
+            if alternative_quote is None:
+                await message.answer(
+                    "Niestety, nie znalazłem nowego cytatu do pokazania w tej chwili."
+                )
+                return
+
+            alternative_signature = _build_quote_signature(alternative_quote)
+            await _reply_with_quote(message, alternative_quote)
+            _remember_chat_response(
+                chat_identifier,
+                thread_identifier,
+                alternative_signature,
             )
             return
 
