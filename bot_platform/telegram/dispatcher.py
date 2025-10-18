@@ -19,6 +19,7 @@ from aiogram.filters.command import CommandObject
 from aiogram.fsm.context import FSMContext
 from aiogram.types import (
     BotCommand,
+    BotCommandScopeAllPrivateChats,
     BotCommandScopeChat,
     CallbackQuery,
     InlineKeyboardMarkup,
@@ -768,6 +769,31 @@ def build_dispatcher(
         else:
             await target.answer("\n".join(lines), reply_markup=builder.as_markup())
 
+    async def _configure_default_commands() -> None:
+        commands = [
+            BotCommand(command="start", description="Rozpocznij pracę z botem"),
+            BotCommand(command="menu", description="Pokaż menu główne"),
+            BotCommand(command="cancel", description="Przerwij bieżącą operację"),
+        ]
+
+        scope_definitions: Iterable[tuple[str, BotCommandScopeChat | BotCommandScopeAllPrivateChats | None]] = [
+            ("domyślnym", None),
+            ("prywatnych czatów", BotCommandScopeAllPrivateChats()),
+        ]
+
+        for scope_label, scope in scope_definitions:
+            try:
+                if scope is None:
+                    await bot.set_my_commands(commands)
+                else:
+                    await bot.set_my_commands(commands, scope=scope)
+            except TelegramBadRequest as exc:
+                logger.warning(
+                    "Nie udało się ustawić komend w zakresie %s: %s",
+                    scope_label,
+                    exc,
+                )
+
     async def _configure_admin_commands() -> None:
         try:
             chat_id = int(admin_chat_id)
@@ -790,6 +816,7 @@ def build_dispatcher(
         except TelegramBadRequest as exc:
             logger.warning("Nie udało się ustawić komend w czacie administracyjnym: %s", exc)
 
+    dispatcher.startup.register(_configure_default_commands)
     dispatcher.startup.register(_configure_admin_commands)
 
     admin_router = Router(name=f"admin-router-{bot_id or 'default'}")
