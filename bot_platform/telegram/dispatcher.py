@@ -2726,12 +2726,14 @@ def build_dispatcher(
             if should_reply_to_candidate:
                 reply_target = candidate
 
+        thread_id = getattr(message, "message_thread_id", None)
+        chat = getattr(message, "chat", None)
+        chat_supports_threads = bool(getattr(chat, "is_forum", False))
+        if thread_id is not None and chat_supports_threads:
+            base_send_kwargs["message_thread_id"] = thread_id
+
         if reply_target is None:
-            thread_id = getattr(message, "message_thread_id", None)
-            chat = getattr(message, "chat", None)
-            chat_supports_threads = bool(getattr(chat, "is_forum", False))
-            if thread_id is not None and chat_supports_threads:
-                base_send_kwargs["message_thread_id"] = thread_id
+            reply_target = message
 
         def _build_send_kwargs(use_thread: bool = True) -> dict[str, Any]:
             kwargs = dict(base_send_kwargs)
